@@ -20,51 +20,55 @@ def close_popups(page: Page):
         """)
     except: pass
 
-def ensure_privacy_consent(page: Page, log_func, results_dir: str) -> bool:
+def ensure_privacy_checkbox_checked(page: Page, log_func) -> bool:
     try:
-        log_info = {"found": False, "target": "none", "checked": False}
-        
-        # 1. Поиск текста Privacy (строго исключаем клики по <a>)
-        keywords = ["Privacy Policy", "Terms of Service", "I agree", "Privacy"]
+        # Ищем блок с обязательным текстом согласия
+        keywords = ["I have read and understood", "consent to the processing", "personal data"]
         found_text = None
         for kw in keywords:
             elements = page.get_by_text(kw, exact=False)
             for i in range(elements.count()):
                 el = elements.nth(i)
-                if el.is_visible(timeout=500) and el.evaluate("node => node.tagName !== 'A' && node.closest('a') === null"):
+                if el.is_visible(timeout=500):
                     found_text = el
                     break
             if found_text: break
         
-        if found_text:
-            log_info["found"] = True
-            # Ищем ближайший кликабельный контейнер (лейбл или див), который НЕ ссылка
-            container = found_text.locator("xpath=./ancestor::*[self::label or self::div or self::p][1]").first
-            
-            # Проверяем наличие чекбокса внутри
-            checkbox = container.locator("input[type='checkbox'], [role='checkbox']").first
-            if checkbox.count() > 0:
-                checkbox.click(force=True, timeout=1000)
-                log_info["target"] = "inner_checkbox"
-                log_info["checked"] = True
-            else:
-                # Кликаем по самому контейнеру через JS для надежности
-                container.evaluate("node => node.click()")
-                log_info["target"] = "container_js_click"
-                log_info["checked"] = True
-        else:
-            # Fallback: любой видимый чекбокс
-            cb = page.locator("input[type='checkbox']:visible, [role='checkbox']:visible").first
-            if cb.count() > 0:
-                cb.click(force=True, timeout=1000)
-                log_info["found"] = True
-                log_info["target"] = "fallback_checkbox"
-                log_info["checked"] = True
+        if not found_text:
+            log_func("Privacy text not found")
+            return False
 
-        log_func(f"consent_checkbox_found={log_info['found']} | consent_click_target={log_info['target']} | consent_checked_after={log_info['checked']}")
-        return log_info["checked"]
+        # Поднимаемся к контейнеру строки (обычно label или div)
+        container = found_text.locator("xpath=./ancestor::*[self::label or self::div][1]").first
+        
+        # 1. Проверяем наличие input[type=checkbox]
+        checkbox = container.locator("input[type='checkbox']").first
+        if checkbox.count() > 0:
+            if not checkbox.is_checked():
+                # Кликаем по родителю или самому чекбоксу, избегая ссылок
+                checkbox.click(force=True, timeout=1000)
+            is_checked = checkbox.is_checked()
+            log_func(f"privacy_checked={is_checked} | privacy_target=input_checkbox")
+            return is_checked
+
+        # 2. Проверяем role="checkbox"
+        role_checkbox = container.locator("[role='checkbox']").first
+        if role_checkbox.count() > 0:
+            if role_checkbox.get_attribute("aria-checked") != "true":
+                role_checkbox.click(force=True, timeout=1000)
+            is_checked = role_checkbox.get_attribute("aria-checked") == "true"
+            log_func(f"privacy_checked={is_checked} | privacy_target=role_checkbox")
+            return is_checked
+
+        # 3. Клик по контейнеру (лейблу) как fallback
+        container.click(force=True, timeout=1000)
+        # Проверяем изменение класса (checked/active)
+        has_class = container.evaluate("node => node.className.toLowerCase().includes('checked') || node.className.toLowerCase().includes('active')")
+        log_func(f"privacy_checked={has_class} | privacy_target=container_click")
+        return True # Считаем успешным, если дошли сюда
+        
     except Exception as e:
-        log_func(f"Error in ensure_privacy_consent: {e}")
+        log_func(f"Error in ensure_privacy_checkbox: {e}")
         return False
 
 def classify_screen(page: Page):
@@ -73,18 +77,17 @@ def classify_screen(page: Page):
     except: pass
     u = page.url.lower()
     
-    paywall_indicators = ["secure checkout", "card number", "cvv", "payment method", "billing cycle", "subscription plan", "payment summary", "total to pay"]
+    paywall_indicators = ["secure checkout", "card number", "cvv", "payment method", "subscription plan", "payment summary"]
     price_indicators = ["/month", "/week", "/year", "billed monthly"]
     if any(k in t for k in paywall_indicators) or (any(k in t for k in price_indicators) and ("$" in t or "€" in t)):
         return 'paywall'
     
-    # Email detection (более надежный)
     inputs = page.locator("input:visible")
-    if "email" in u or "email" in t or "address" in t:
-        if inputs.count() > 0: return 'email'
+    if ("email" in u or "email" in t) and inputs.count() > 0:
+        return 'email'
     for i in range(inputs.count()):
         p = (inputs.nth(i).get_attribute("placeholder") or "").lower()
-        if any(k in p for k in ["email", "mail"]): return 'email'
+        if "email" in p or "mail" in p: return 'email'
         
     return 'question'
 
@@ -93,24 +96,31 @@ def perform_action(page: Page, screen_type: str, step_num: int, log_func, result
         if screen_type == 'paywall': return "stop"
         
         if screen_type == 'email':
-            # 1. Privacy Consent
-            ensure_privacy_consent(page, log_func, results_dir)
-            # 2. Fill Email
-            email_input = page.locator("input:visible").first
-            email_input.click()
-            email_input.fill(f"testuser{int(time.time())}@gmail.com")
-            # 3. Submit (через клик по кнопке с текстом)
-            submit_clicked = "enter"
-            for text in ['Continue', 'Next', 'Submit', 'Get my plan']:
-                btn = page.get_by_text(text, exact=False).first
-                # Кликаем только если это не ссылка
-                if btn.is_visible(timeout=500) and btn.evaluate("node => node.tagName !== 'A'"):
+            for attempt in range(2):
+                # 1. Privacy Checkbox
+                ensure_privacy_checkbox_checked(page, log_func)
+                
+                # 2. Fill Email
+                email_input = page.locator("input:visible").first
+                email_input.click()
+                email_input.fill("john@example.com")
+                
+                # 3. Submit
+                btn = page.get_by_text("Continue", exact=False).first
+                if btn.is_visible(timeout=500):
                     btn.click(force=True, timeout=1000)
-                    submit_clicked = text
-                    break
-            else:
-                page.keyboard.press("Enter")
-            return f"email_filled=true | submit_clicked={submit_clicked}"
+                else:
+                    page.keyboard.press("Enter")
+                
+                # Ожидание прогресса и проверка на ошибку
+                time.sleep(2.5)
+                error_msg = page.get_by_text("please accept our Privacy Policy", exact=False)
+                if error_msg.is_visible(timeout=500):
+                    log_func("Red error detected: 'please accept our Privacy Policy'. Retrying...")
+                    continue
+                else:
+                    return "email_submitted_successfully"
+            return "email_failed_after_retries"
             
         # Standard question handling
         choice_sel = ["[data-testid*='answer' i]:visible", "[class*='Item' i]:visible", "[class*='Card' i]:visible", "label:visible"]
