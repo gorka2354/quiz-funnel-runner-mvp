@@ -1,0 +1,8 @@
+{
+ "funnels": [
+  "https://madmuscles.com/funnel/default-uni-soft-new/step-one"
+ ],
+ "headless": true,
+ "max_steps": 40,
+ "slow_mo_ms": 0
+}
