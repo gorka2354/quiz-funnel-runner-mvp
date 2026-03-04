@@ -22,7 +22,6 @@ def close_popups(page: Page):
 
 def ensure_privacy_checkbox_checked(page: Page, log_func) -> bool:
     try:
-        # Ищем блок с обязательным текстом согласия
         keywords = ["I have read and understood", "consent to the processing", "personal data"]
         found_text = None
         for kw in keywords:
@@ -35,23 +34,17 @@ def ensure_privacy_checkbox_checked(page: Page, log_func) -> bool:
             if found_text: break
         
         if not found_text:
-            log_func("Privacy text not found")
             return False
 
-        # Поднимаемся к контейнеру строки (обычно label или div)
         container = found_text.locator("xpath=./ancestor::*[self::label or self::div][1]").first
-        
-        # 1. Проверяем наличие input[type=checkbox]
         checkbox = container.locator("input[type='checkbox']").first
         if checkbox.count() > 0:
             if not checkbox.is_checked():
-                # Кликаем по родителю или самому чекбоксу, избегая ссылок
                 checkbox.click(force=True, timeout=1000)
             is_checked = checkbox.is_checked()
             log_func(f"privacy_checked={is_checked} | privacy_target=input_checkbox")
             return is_checked
 
-        # 2. Проверяем role="checkbox"
         role_checkbox = container.locator("[role='checkbox']").first
         if role_checkbox.count() > 0:
             if role_checkbox.get_attribute("aria-checked") != "true":
@@ -60,28 +53,62 @@ def ensure_privacy_checkbox_checked(page: Page, log_func) -> bool:
             log_func(f"privacy_checked={is_checked} | privacy_target=role_checkbox")
             return is_checked
 
-        # 3. Клик по контейнеру (лейблу) как fallback
         container.click(force=True, timeout=1000)
-        # Проверяем изменение класса (checked/active)
-        has_class = container.evaluate("node => node.className.toLowerCase().includes('checked') || node.className.toLowerCase().includes('active')")
-        log_func(f"privacy_checked={has_class} | privacy_target=container_click")
-        return True # Считаем успешным, если дошли сюда
+        log_func(f"privacy_checked=true | privacy_target=container_click")
+        return True
         
     except Exception as e:
         log_func(f"Error in ensure_privacy_checkbox: {e}")
         return False
 
-def classify_screen(page: Page):
+def classify_screen(page: Page, log_func):
     t = ""
     try: t = page.evaluate("() => (document.body.innerText || '').toLowerCase()")
     except: pass
     u = page.url.lower()
     
-    paywall_indicators = ["secure checkout", "card number", "cvv", "payment method", "subscription plan", "payment summary"]
-    price_indicators = ["/month", "/week", "/year", "billed monthly"]
-    if any(k in t for k in paywall_indicators) or (any(k in t for k in price_indicators) and ("$" in t or "€" in t)):
-        return 'paywall'
+    # 1. Признаки Checkout (Оплата) - СТОП для безопасности
+    checkout_indicators = ["card number", "cvv", "mm/yy", "confirm payment", "paypal buy now", "secure checkout"]
+    checkout_inputs = page.locator("input[name*='card'], input[autocomplete*='cc-']").count()
+    has_checkout_text = any(k in t for k in checkout_indicators)
     
+    if has_checkout_text or checkout_inputs > 0:
+        log_func(f"checkout_signals: text={has_checkout_text}, inputs={checkout_inputs}")
+        return 'checkout'
+
+    # 2. Охранный признак вопросника (Progress Bar \d+/\d+)
+    progress_pattern = re.search(r'\d+/\d+', t)
+    has_progress = progress_pattern is not None
+    
+    # 3. Признаки Paywall (Тарифы)
+    signals = []
+    
+    # А) Деньги/Цены
+    if any(k in t for k in ["€", "$", "£", "₽"]) or re.search(r'\d+[.,]\d+\s*[€$£₽]', t):
+        signals.append("currency_price")
+        
+    # Б) Подписка/Биллинг
+    billing_keywords = ["subscribe", "trial", "billed", "per week", "per month", "week plan", "month plan", "12-week plan", "4-week plan"]
+    if any(k in t for k in billing_keywords):
+        signals.append("subscription_billing")
+        
+    # В) CTA Оплаты
+    cta_keywords = ["get my plan", "buy", "checkout", "confirm payment", "start trial", "get plan"]
+    if any(k in t for k in cta_keywords):
+        signals.append("cta_payment")
+
+    paywall_score = len(signals)
+    
+    # Условие Paywall: минимум 2 из 3 сигналов И отсутствие индикатора прогресса (или наличие цен при прогрессе)
+    # Если есть прогресс-бар, мы ОЧЕНЬ осторожны с определением paywall
+    if paywall_score >= 2:
+        if has_progress and "currency_price" not in signals:
+            log_func(f"Paywall signals detected ({signals}), but progress bar '{progress_pattern.group(0)}' found. Treating as question.")
+        else:
+            log_func(f"paywall_signals: {signals} | score: {paywall_score}")
+            return 'paywall'
+    
+    # 4. Email detection
     inputs = page.locator("input:visible")
     if ("email" in u or "email" in t) and inputs.count() > 0:
         return 'email'
@@ -93,36 +120,35 @@ def classify_screen(page: Page):
 
 def perform_action(page: Page, screen_type: str, step_num: int, log_func, results_dir: str):
     try:
-        if screen_type == 'paywall': return "stop"
+        if screen_type == 'paywall':
+            page.screenshot(path=os.path.join(results_dir, "paywall_reached.png"), full_page=True)
+            return "stopped at paywall"
+            
+        if screen_type == 'checkout':
+            page.screenshot(path=os.path.join(results_dir, "checkout_reached.png"), full_page=True)
+            return "checkout reached (safety stop)"
         
         if screen_type == 'email':
             for attempt in range(2):
-                # 1. Privacy Checkbox
                 ensure_privacy_checkbox_checked(page, log_func)
-                
-                # 2. Fill Email
                 email_input = page.locator("input:visible").first
                 email_input.click()
-                email_input.fill("john@example.com")
+                email_input.fill(f"testuser{int(time.time())}@gmail.com")
                 
-                # 3. Submit
                 btn = page.get_by_text("Continue", exact=False).first
                 if btn.is_visible(timeout=500):
                     btn.click(force=True, timeout=1000)
                 else:
                     page.keyboard.press("Enter")
                 
-                # Ожидание прогресса и проверка на ошибку
                 time.sleep(2.5)
                 error_msg = page.get_by_text("please accept our Privacy Policy", exact=False)
                 if error_msg.is_visible(timeout=500):
-                    log_func("Red error detected: 'please accept our Privacy Policy'. Retrying...")
+                    log_func("Red error detected. Retrying email step...")
                     continue
-                else:
-                    return "email_submitted_successfully"
-            return "email_failed_after_retries"
+                return "email_submitted_successfully"
+            return "email_failed"
             
-        # Standard question handling
         choice_sel = ["[data-testid*='answer' i]:visible", "[class*='Item' i]:visible", "[class*='Card' i]:visible", "label:visible"]
         clicked_any = False
         for s in choice_sel:
@@ -141,11 +167,11 @@ def perform_action(page: Page, screen_type: str, step_num: int, log_func, result
         for text in ['Continue', 'Next', 'Get my plan', 'Start', 'Got it']:
             btn = page.get_by_text(text, exact=False).first
             if btn.is_visible(timeout=500) and btn.evaluate("node => node.tagName !== 'A'"):
-                btn.click(force=True, timeout=1000); return f"act:click:{text}"
+                btn.tap(force=True, timeout=1000); return f"act:tap:{text}"
 
         btns = page.locator("button:visible, [role='button']:visible")
         if btns.count() > 0:
-            btns.last.click(force=True, timeout=1000); return "act:last_btn_click"
+            btns.last.tap(force=True, timeout=1000); return "act:last_btn_tap"
                 
     except Exception as e: return f"err:{str(e)}"
     return "none"
@@ -171,11 +197,11 @@ def run_funnel(url: str, config: dict, is_headless: bool):
                 if stuck_count >= 3: log("Stuck on the same screen. Stopping."); break
                 history.append(curr_id)
                 close_popups(page)
-                st = classify_screen(page)
+                st = classify_screen(page, log)
                 page.screenshot(path=os.path.join(res_dir, f"{step:02d}_{st}.png"), full_page=True)
                 act = perform_action(page, st, stuck_count, log, res_dir)
                 log(f"action: {act} | type: {st}")
-                if st == 'paywall': break
+                if st in ['paywall', 'checkout'] or "stopped" in act or "reached" in act: break
                 step += 1
             browser.close()
 
