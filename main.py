@@ -70,9 +70,20 @@ def find_continue_button(page: Page):
         btn = page.get_by_text(text, exact=False).first
         if btn.is_visible(timeout=500) and btn.evaluate("node => node.tagName !== 'A'"):
             return btn
+    btn = page.locator("button:visible, [role='button']:visible").last
+    if btn.count() > 0 and btn.is_visible(timeout=500):
+        return btn
     return None
 
-def perform_action(page: Page, screen_type: str, log_func, results_dir: str, prev_hash: str, prev_url: str):
+def wait_for_transition(page: Page, old_url: str, old_hash: str, timeout=3.0):
+    start = time.time()
+    while time.time() - start < timeout:
+        if page.url != old_url or get_screen_hash(page) != old_hash:
+            return True
+        time.sleep(0.5)
+    return False
+
+def perform_action(page: Page, screen_type: str, log_func, results_dir: str, start_hash: str, start_url: str):
     try:
         if screen_type == 'paywall': return "stopped at paywall"
         if screen_type == 'checkout': return "checkout reached"
@@ -84,45 +95,54 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, pre
             btn = find_continue_button(page)
             if btn: btn.click(force=True, timeout=1000)
             else: page.keyboard.press("Enter")
-            log_func("Email submitted. Waiting 8s for animations...")
-            time.sleep(8)
+            log_func("Email submitted. Waiting for transition...")
+            wait_for_transition(page, start_url, start_hash, timeout=10.0)
             return "email_submitted"
             
         if screen_type == 'question':
-            choice_sel = ["[data-testid*='answer' i]:visible", "[class*='Item' i]:visible", "[class*='Card' i]:visible", "label:visible"]
+            choice_sel = ["[data-testid*='answer' i]:visible", "[class*='Item' i]:visible", "[class*='Card' i]:visible", "label:visible", "button:visible"]
             choices = None
             for s in choice_sel:
                 els = page.locator(s)
                 if els.count() > 0: choices = els; break
             
-            # Если вариантов нет, пробуем просто нажать Continue (для промежуточных экранов)
+            cont_btn = find_continue_button(page)
             if not choices:
-                cont_btn = find_continue_button(page)
                 if cont_btn:
                     cont_btn.tap(force=True, timeout=1000)
-                    return "no_choices_but_continue_pressed"
+                    wait_for_transition(page, start_url, start_hash)
+                    return "info_continue_pressed"
                 return "no_choices_found"
 
+            # 1. Клик по варианту
             choices.first.tap(force=True, timeout=1000)
-            time.sleep(1) # Короткая пауза для анимации выбора
             
+            # 2. Ждем активации кнопки или авто-перехода
+            # Мы НЕ выходим из функции, пока не совершим все действия на этом экране
             start_time = time.time()
             while time.time() - start_time < 3.0:
-                if page.url != prev_url or get_screen_hash(page) != prev_hash: return "auto_advanced"
-                cont_btn = find_continue_button(page)
-                if cont_btn and cont_btn.is_enabled():
-                    cont_btn.tap(force=True, timeout=1000); return "clicked_option_then_continue"
+                if page.url != start_url: break # URL изменился - успех
+                
+                curr_cont = find_continue_button(page)
+                if curr_cont and curr_cont.is_enabled():
+                    curr_cont.tap(force=True, timeout=1000)
+                    break # Кликнули продолжить - успех
                 time.sleep(0.5)
 
-            # Fallback для мультиселекта
-            cont_btn = find_continue_button(page)
-            if cont_btn:
-                for i in range(1, min(choices.count(), 3)):
-                    choices.nth(i).tap(force=True, timeout=500)
-                    if cont_btn.is_enabled():
-                        cont_btn.tap(force=True, timeout=1000); return f"multiselect_passed_{i+1}"
+            # 3. Если все еще на той же странице и кнопка disabled - Multiselect
+            if page.url == start_url:
+                curr_cont = find_continue_button(page)
+                if curr_cont and not curr_cont.is_enabled():
+                    log_func("Multiselect detected. Selecting more options...")
+                    for i in range(1, min(choices.count(), 4)):
+                        choices.nth(i).tap(force=True, timeout=500)
+                        if curr_cont.is_enabled():
+                            curr_cont.tap(force=True, timeout=1000)
+                            break
             
-            return "stuck_on_question"
+            # 4. Финальное ожидание завершения перехода
+            wait_for_transition(page, start_url, start_hash)
+            return "screen_interaction_completed"
                 
     except Exception as e: return f"err:{str(e)}"
     return "none"
@@ -145,21 +165,28 @@ def run_funnel(url: str, config: dict, is_headless: bool):
             
             step, history = 1, []
             while step <= 80:
+                # Стабилизация перед классификацией
                 curr_u = page.url
-                if any(k in curr_u for k in ["magic", "analyzing", "loading"]): time.sleep(12); curr_u = page.url
-                
-                curr_h = get_screen_hash(page); curr_id = f"{curr_u}|{curr_h}"
-                if history.count(curr_id) >= 3: log(f"Stuck at {curr_u}"); summary["error"] = "stuck_loop"; break
-                history.append(curr_id)
+                if any(k in curr_u for k in ["magic", "analyzing", "loading"]): 
+                    time.sleep(12); curr_u = page.url
                 
                 close_popups(page)
+                curr_h = get_screen_hash(page)
                 st = classify_screen(page, log)
                 
+                # Проверка stuck (URL + Hash)
+                curr_id = f"{curr_u}|{curr_h}"
+                if history.count(curr_id) >= 2: # Уменьшаем лимит для скорости
+                    log(f"Stuck at {curr_u}. Stopping."); summary["error"] = "stuck_loop"; break
+                history.append(curr_id)
+                
+                # ОДИН скриншот на один уникальный экран
                 screen_name = f"{step:02d}_{st}.png"
                 local_path = os.path.join(res_dir, screen_name)
                 page.screenshot(path=local_path, full_page=True)
                 shutil.copy2(local_path, os.path.join(classified_dir, st, f"{slug}__{screen_name}"))
                 
+                # ВЫПОЛНЕНИЕ ВСЕХ ДЕЙСТВИЙ НА ЭКРАНЕ
                 act = perform_action(page, st, log, res_dir, curr_h, curr_u)
                 log(f"step:{step} | type:{st} | action:{act} | url:{page.url[:60]}")
                 
@@ -167,9 +194,11 @@ def run_funnel(url: str, config: dict, is_headless: bool):
                 if st in ['paywall', 'checkout'] or "stopped" in act or "reached" in act:
                     if st == 'paywall': summary["paywall_reached"] = True
                     break
+                
                 step += 1
             browser.close()
-    with open(os.path.join('results', 'summary.json'), 'w', encoding='utf-8') as f: json.dump([summary], f, indent=4)
+    with open(os.path.join('results', 'summary.json'), 'w', encoding='utf-8') as f:
+        json.dump([summary], f, indent=4)
 
 if __name__ == '__main__':
     with open('config.json', 'r') as f: config = json.load(f)
