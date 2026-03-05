@@ -223,121 +223,68 @@ def classify_screen(page: Page, log_func):
         return debug_return('checkout', "Checkout keywords or card inputs found")
 
     # 2. Paywall
-    has_price = any(k in t for k in ["€", "$", "£", "₽"]) or re.search(r'\d+[.,]\d+\s*[€$£₽]', t)
+    has_price = any(k in t for k in ["€", "$", "£", "₽"]) or re.search(r'\d+[.,]\d+\s*[€$£₽]', t)        
     has_billing = any(k in t for k in ["subscribe", "trial", "billed", "week plan", "month plan", "pricing", "plans"])
     has_cta = any(k in t for k in ["get my plan", "checkout", "start trial"])
-    
-    if "coursiv.io" in u and "selling-page" in u:
-        return debug_return('paywall', "URL contains selling-page")
-        
-    if has_price and has_billing and has_cta:
-        return debug_return('paywall', "Pricing, currency, and CTA signals found")
+    if ("coursiv.io" in u and "selling-page" in u) or (has_price and has_billing and has_cta):
+        return debug_return('paywall', "Paywall signals detected")
 
     # 3. Email
-    has_email_input = False
-    email_inputs = page.locator("input[type='email'], input[autocomplete*='email' i]")
-    if email_inputs.count() > 0:
-        has_email_input = True
-    else:
+    has_email_input = page.locator("input[type='email'], input[autocomplete*='email' i]").count() > 0
+    if not has_email_input:
         inputs = page.locator("input:not([type='hidden'])")
         for i in range(inputs.count()):
             try:
                 p = (inputs.nth(i).get_attribute("placeholder") or "").lower()
-                if "email" in p or "e-mail" in p or "mail@" in p:
-                    has_email_input = True
-                    break
+                if any(k in p for k in ["email", "e-mail", "mail@"]): has_email_input = True; break
             except: pass
+    if has_email_input: return debug_return('email', "Email field found")
 
-    if has_email_input:
-        return debug_return('email', "Explicit email input or placeholder found")
-
-    # 4. Input
+    # 4. Input (with animation safety)
     pd_kws = ["age", "height", "weight", "name", "cm", "kg", "years", "call you"]
-    has_pd = any(k in t for k in pd_kws) or any(k in u for k in ["name", "age", "weight", "height"])
-
-    try:
-        if has_pd:
-            page.wait_for_selector("input:not([type='hidden']):visible, textarea:visible", timeout=3500)
-    except: pass
-
+    if any(k in t for k in pd_kws) or any(k in u for k in ["name", "age", "weight", "height"]):
+        try: page.wait_for_selector("input:not([type='hidden']):visible", timeout=2000)
+        except: pass
+    
     inputs = page.locator("input:not([type='hidden']):visible, textarea:visible")
-    text_inputs = 0
-    for i in range(inputs.count()):
-        try:
-            itype = (inputs.nth(i).get_attribute("type") or "text").lower()
-            if itype in ["text", "number", "tel", "password", "date"]:
-                text_inputs += 1
-        except: pass
+    if inputs.count() >= 1: return debug_return('input', f"{inputs.count()} input(s) found")
 
-    if text_inputs >= 1:
-        return debug_return('input', f"1+ visible text inputs found ({text_inputs})")
+    # 5. Question vs Info (Smart separation)
+    nav_words = ["next", "continue", "skip", "back", "weiter", "zurück", "next step", "proceed", "got it", "ok", "принять", "ок"]
+    
+    # Get all potential interactive elements
+    raw_els = page.locator("[data-testid*='answer' i]:visible, [class*='Card' i]:not([class*='testimonial' i]):not([class*='review' i]):visible, label:visible, button:visible, a.button:visible, [role='button']:visible")
+    
+    choices = []
+    nav_btns = []
+    
+    for i in range(raw_els.count()):
+        el = raw_els.nth(i)
+        if is_forbidden_button(el): continue
+        txt = (el.inner_text() or "").lower().strip()
+        if not txt or re.fullmatch(r'[\d%.,\s\-+]+', txt) or len(txt) < 2: continue
+        
+        if any(w == txt or txt.startswith(w + " ") for w in nav_words):
+            nav_btns.append(txt)
+        else:
+            choices.append(txt)
 
-    # 5. Question
-    choice_sel = [
-        "[data-testid*='answer' i]:visible", 
-        "input[type='radio']:visible",
-        "option:visible",
-        "[class*='Card' i]:not([class*='testimonial' i]):not([class*='review' i]):visible", 
-        "label:visible",
-        "button:visible"
-    ]
-    choices_count = 0
-    exact_ignore = [
-        "next", "continue", "back", "skip", "submit", "weiter", "zurück", "next step", "proceed",
-        "accept", "allow", "reject", "decline", "agree", "got it", "ok",
-        "accept all", "allow all", "reject all", "decline all", "alle akzeptieren", "alle ablehnen",
-        "nur notwendige", "essential only", "only necessary", "принять", "принять все", "разрешить", "ок"
-    ]
+    # Logic rules
+    if len(choices) >= 2:
+        return debug_return('question', f"Multiple choices found ({len(choices)})")
+    
+    if len(choices) == 1 and len(nav_btns) >= 1:
+        return debug_return('question', "Gated question: choice + next button")
+        
+    if len(nav_btns) >= 1:
+        return debug_return('info', "Only navigation buttons found")
 
-    for s in choice_sel:
-        try:
-            els = page.locator(s)
-            cnt = 0
-            for i in range(els.count()):
-                el_txt = (els.nth(i).inner_text() or "").lower().strip()
-                if not el_txt: continue
-                # Ignore purely numeric or percentage texts (e.g., on a prize wheel or pricing cards)
-                if re.fullmatch(r'[\d%.,\s\-+]+', el_txt) or len(el_txt) < 3:
-                    continue
-                # Ignore strictly navigational or cookie buttons
-                if el_txt in exact_ignore or is_cookie_settings(el_txt) or "cookie" in el_txt:
-                    continue
+    # Fallback for questions without clear buttons
+    if "?" in t or re.search(r'\d+/\d+', t):
+        return debug_return('question', "Question mark or progress detected")
 
-                cnt += 1
-            if cnt >= 2:
-                choices_count = cnt
-                break
-        except: pass
+    return debug_return('other', "No clear type detected")
 
-    if choices_count >= 2:
-        return debug_return('question', f">=2 choices found (count={choices_count})")
-
-    # 6. Info (Moved above the question mark fallback to correctly classify CTA-only screens with question marks)
-    cta_kws = ['next', 'continue', 'start', 'yes', "i'm in", "got it", "let's go", "see results", "claim", "discount", "get", "spin"]
-    has_info_cta = False
-    try:
-        btns = page.locator("button:visible, a.button:visible, [role='button']:visible, [class*='Button' i]:visible, [class*='Item' i]:visible, [class*='Card' i]:visible")
-        for i in range(btns.count()):
-            btn_txt = (btns.nth(i).inner_text() or "").lower().strip()
-            if any(k in btn_txt for k in cta_kws):
-                has_info_cta = True
-                break
-    except: pass
-
-    if has_info_cta:
-        return debug_return('info', "1 dominant button/CTA found, no inputs/choices")
-
-    # Fallback to Question if progress or question mark exist, but no inputs/choices/CTAs
-    has_progress = bool(re.search(r'\d+/\d+', t))
-    has_question_mark = "?" in t
-
-    if has_progress:
-        return debug_return('question', "Progress indicator (x/y) found")
-    if has_question_mark:
-        return debug_return('question', "Question mark (?) found in text")
-
-    # 7. Other
-    return debug_return('other', "Fell through all rules")
 
 def find_continue_button(page: Page, log_func=None):
     keywords = [
