@@ -158,35 +158,43 @@ def classify_screen(page: Page, log_func):
         return debug_return('paywall', "Pricing, currency, and CTA signals found")
 
     # 3. Email
+    has_email_input = False
     email_inputs = page.locator("input[type='email'], input[autocomplete*='email' i]")
     if email_inputs.count() > 0:
-        return debug_return('email', "Explicit email input found")
-        
-    inputs = page.locator("input:not([type='hidden'])")
-    has_email_placeholder = False
-    text_number_inputs = 0
-    
-    for i in range(inputs.count()):
-        try:
-            itype = (inputs.nth(i).get_attribute("type") or "text").lower()
-            p = (inputs.nth(i).get_attribute("placeholder") or "").lower()
-            if any(k in p for k in ["email", "mail"]):
-                has_email_placeholder = True
-                break
-            if itype in ["text", "number", "tel"]:
-                text_number_inputs += 1
-        except: pass
+        has_email_input = True
+    else:
+        inputs = page.locator("input:not([type='hidden'])")
+        for i in range(inputs.count()):
+            try:
+                p = (inputs.nth(i).get_attribute("placeholder") or "").lower()
+                if "email" in p or "e-mail" in p or "mail@" in p:
+                    has_email_input = True
+                    break
+            except: pass
 
-    if has_email_placeholder or ("email" in u and inputs.count() > 0):
-        return debug_return('email', "Email placeholder or URL+input found")
+    if has_email_input:
+        return debug_return('email', "Explicit email input or placeholder found")
 
     # 4. Input
     pd_kws = ["age", "height", "weight", "name", "cm", "kg", "years", "call you"]
-    has_pd = any(k in t for k in pd_kws)
-    if text_number_inputs >= 2:
-        return debug_return('input', f">=2 text/number inputs found ({text_number_inputs})")
-    elif text_number_inputs == 1 and has_pd:
-        return debug_return('input', "1 text/number input + personal data keywords found")
+    has_pd = any(k in t for k in pd_kws) or any(k in u for k in ["name", "age", "weight", "height"])
+
+    try:
+        if has_pd:
+            page.wait_for_selector("input:not([type='hidden']):visible, textarea:visible", timeout=3500)
+    except: pass
+
+    inputs = page.locator("input:not([type='hidden']):visible, textarea:visible")
+    text_inputs = 0
+    for i in range(inputs.count()):
+        try:
+            itype = (inputs.nth(i).get_attribute("type") or "text").lower()
+            if itype in ["text", "number", "tel", "password", "date"]:
+                text_inputs += 1
+        except: pass
+
+    if text_inputs >= 1:
+        return debug_return('input', f"1+ visible text inputs found ({text_inputs})")
 
     # 5. Question
     choice_sel = [
@@ -198,8 +206,8 @@ def classify_screen(page: Page, log_func):
         "button:visible"
     ]
     choices_count = 0
-    nav_kws = ['next', 'continue', 'start', 'yes', "i'm in", "got it", "let's go", "see results", "back", "accept", "allow", "skip", "submit", "weiter", "zurück"]
-    
+    nav_kws = ['next', 'continue', 'start', 'yes', "i'm in", "got it", "let's go", "see results", "back", "accept", "allow", "skip", "submit", "weiter", "zurück", "claim", "discount", "get", "spin", "alle", "reject", "decline", "agree", "nur", "only"]
+
     for s in choice_sel:
         try:
             els = page.locator(s)
@@ -207,6 +215,9 @@ def classify_screen(page: Page, log_func):
             for i in range(els.count()):
                 el_txt = (els.nth(i).inner_text() or "").lower().strip()
                 if not el_txt: continue
+                # Ignore purely numeric or percentage texts (e.g., on a prize wheel or pricing cards)
+                if re.fullmatch(r'[\d%.,\s\-+]+', el_txt) or len(el_txt) < 3:
+                    continue
                 # Ignore purely navigational or cookie buttons
                 is_nav = False
                 for kw in nav_kws:
@@ -219,21 +230,14 @@ def classify_screen(page: Page, log_func):
                 break
         except: pass
 
-    has_progress = bool(re.search(r'\d+/\d+', t))
-    has_question_mark = "?" in t
-
     if choices_count >= 2:
         return debug_return('question', f">=2 choices found (count={choices_count})")
-    if has_progress:
-        return debug_return('question', "Progress indicator (x/y) found")
-    if has_question_mark:
-        return debug_return('question', "Question mark (?) found in text")
 
-    # 6. Info
-    cta_kws = ['next', 'continue', 'start', 'yes', "i'm in", "got it", "let's go", "see results"]
+    # 6. Info (Moved above the question mark fallback to correctly classify CTA-only screens with question marks)
+    cta_kws = ['next', 'continue', 'start', 'yes', "i'm in", "got it", "let's go", "see results", "claim", "discount", "get", "spin"]
     has_info_cta = False
     try:
-        btns = page.locator("button:visible, a.button:visible, [role='button']:visible")
+        btns = page.locator("button:visible, a.button:visible, [role='button']:visible, [class*='Button' i]:visible, [class*='Item' i]:visible, [class*='Card' i]:visible")
         for i in range(btns.count()):
             btn_txt = (btns.nth(i).inner_text() or "").lower().strip()
             if any(k in btn_txt for k in cta_kws):
@@ -242,7 +246,16 @@ def classify_screen(page: Page, log_func):
     except: pass
 
     if has_info_cta:
-        return debug_return('info', "No inputs/choices, but CTA button found")
+        return debug_return('info', "1 dominant button/CTA found, no inputs/choices")
+
+    # Fallback to Question if progress or question mark exist, but no inputs/choices/CTAs
+    has_progress = bool(re.search(r'\d+/\d+', t))
+    has_question_mark = "?" in t
+
+    if has_progress:
+        return debug_return('question', "Progress indicator (x/y) found")
+    if has_question_mark:
+        return debug_return('question', "Question mark (?) found in text")
 
     # 7. Other
     return debug_return('other', "Fell through all rules")
