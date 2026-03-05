@@ -128,33 +128,124 @@ def ensure_privacy_checkbox_checked(page: Page, log_func) -> bool:
         return True
     except: return False
 
+DEBUG_CLASSIFY = True
+
 def classify_screen(page: Page, log_func):
+    def debug_return(ctype, reason):
+        if DEBUG_CLASSIFY:
+            log_func(f"classify_reason={reason}")
+        return ctype
+
     t = ""
     try: t = page.evaluate("() => (document.body.innerText || '').toLowerCase()")
     except: pass
     u = page.url.lower()
     
-    # Site-specific for Coursiv
+    # 1. Checkout
+    checkout_kws = ["card number", "cvv", "mm/yy", "confirm payment", "paypal", "buy now"]
+    if any(k in t for k in checkout_kws) or page.locator("input[name*='card']").count() > 0:
+        return debug_return('checkout', "Checkout keywords or card inputs found")
+
+    # 2. Paywall
+    has_price = any(k in t for k in ["€", "$", "£", "₽"]) or re.search(r'\d+[.,]\d+\s*[€$£₽]', t)
+    has_billing = any(k in t for k in ["subscribe", "trial", "billed", "week plan", "month plan", "pricing", "plans"])
+    has_cta = any(k in t for k in ["get my plan", "checkout", "start trial"])
+    
     if "coursiv.io" in u and "selling-page" in u:
-        return 'paywall'
+        return debug_return('paywall', "URL contains selling-page")
+        
+    if has_price and has_billing and has_cta:
+        return debug_return('paywall', "Pricing, currency, and CTA signals found")
 
-    if any(k in t for k in ["card number", "cvv", "mm/yy", "confirm payment"]) or page.locator("input[name*='card']").count() > 0:
-        return 'checkout'
-
-    signals = []
-    if any(k in t for k in ["€", "$", "£", "₽"]) or re.search(r'\d+[.,]\d+\s*[€$£₽]', t): signals.append("price")
-    if any(k in t for k in ["subscribe", "trial", "billed", "week plan", "month plan"]): signals.append("billing")
-    if any(k in t for k in ["get my plan", "checkout", "start trial"]): signals.append("cta")
-
-    if len(signals) >= 2 and not re.search(r'\d+/\d+', t): return 'paywall'
+    # 3. Email
+    email_inputs = page.locator("input[type='email'], input[autocomplete*='email' i]")
+    if email_inputs.count() > 0:
+        return debug_return('email', "Explicit email input found")
+        
+    inputs = page.locator("input:not([type='hidden'])")
+    has_email_placeholder = False
+    text_number_inputs = 0
     
-    inputs = page.locator("input:visible")
-    if ("email" in u or "email" in t) and inputs.count() > 0: return 'email'
     for i in range(inputs.count()):
-        p = (inputs.nth(i).get_attribute("placeholder") or "").lower()
-        if any(k in p for k in ["email", "mail"]): return 'email'
+        try:
+            itype = (inputs.nth(i).get_attribute("type") or "text").lower()
+            p = (inputs.nth(i).get_attribute("placeholder") or "").lower()
+            if any(k in p for k in ["email", "mail"]):
+                has_email_placeholder = True
+                break
+            if itype in ["text", "number", "tel"]:
+                text_number_inputs += 1
+        except: pass
+
+    if has_email_placeholder or ("email" in u and inputs.count() > 0):
+        return debug_return('email', "Email placeholder or URL+input found")
+
+    # 4. Input
+    pd_kws = ["age", "height", "weight", "name", "cm", "kg", "years", "call you"]
+    has_pd = any(k in t for k in pd_kws)
+    if text_number_inputs >= 2:
+        return debug_return('input', f">=2 text/number inputs found ({text_number_inputs})")
+    elif text_number_inputs == 1 and has_pd:
+        return debug_return('input', "1 text/number input + personal data keywords found")
+
+    # 5. Question
+    choice_sel = [
+        "[data-testid*='answer' i]:visible", 
+        "input[type='radio']:visible",
+        "option:visible",
+        "[class*='Card' i]:not([class*='testimonial' i]):not([class*='review' i]):visible", 
+        "label:visible",
+        "button:visible"
+    ]
+    choices_count = 0
+    nav_kws = ['next', 'continue', 'start', 'yes', "i'm in", "got it", "let's go", "see results", "back", "accept", "allow", "skip", "submit", "weiter", "zurück"]
     
-    return 'question'
+    for s in choice_sel:
+        try:
+            els = page.locator(s)
+            cnt = 0
+            for i in range(els.count()):
+                el_txt = (els.nth(i).inner_text() or "").lower().strip()
+                if not el_txt: continue
+                # Ignore purely navigational or cookie buttons
+                is_nav = False
+                for kw in nav_kws:
+                    if el_txt == kw or el_txt.startswith(kw) or is_cookie_settings(el_txt) or "cookie" in el_txt:
+                        is_nav = True; break
+                if not is_nav:
+                    cnt += 1
+            if cnt >= 2:
+                choices_count = cnt
+                break
+        except: pass
+
+    has_progress = bool(re.search(r'\d+/\d+', t))
+    has_question_mark = "?" in t
+
+    if choices_count >= 2:
+        return debug_return('question', f">=2 choices found (count={choices_count})")
+    if has_progress:
+        return debug_return('question', "Progress indicator (x/y) found")
+    if has_question_mark:
+        return debug_return('question', "Question mark (?) found in text")
+
+    # 6. Info
+    cta_kws = ['next', 'continue', 'start', 'yes', "i'm in", "got it", "let's go", "see results"]
+    has_info_cta = False
+    try:
+        btns = page.locator("button:visible, a.button:visible, [role='button']:visible")
+        for i in range(btns.count()):
+            btn_txt = (btns.nth(i).inner_text() or "").lower().strip()
+            if any(k in btn_txt for k in cta_kws):
+                has_info_cta = True
+                break
+    except: pass
+
+    if has_info_cta:
+        return debug_return('info', "No inputs/choices, but CTA button found")
+
+    # 7. Other
+    return debug_return('other', "Fell through all rules")
 
 def find_continue_button(page: Page):
     keywords = [
@@ -210,7 +301,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             wait_for_transition(page, start_url, start_hash, timeout=12.0)
             return "email_submitted"
 
-        if screen_type == 'question':
+        if screen_type in ['question', 'info', 'input', 'other']:
             cont_btn = find_continue_button(page)
             # Priority to "Start" buttons
             if cont_btn and any(k in (cont_btn.inner_text() or "").lower() for k in ["start", "get my", "get started", "take the", "offer"]):
