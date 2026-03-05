@@ -30,41 +30,82 @@ def get_screen_hash(page: Page):
 
 def close_popups(page: Page, log_func):
     try:
-        # 1. Try to click Accept/Reject buttons (Whitelist)
-        whitelist = ['Accept', 'Allow', 'Agree', 'OK', 'Reject', 'Decline', 'Only necessary', 'Essential only', 'Accept all', 'Allow all']
+        whitelist = ['Accept', 'Accept all', 'Allow all', 'I agree', 'Agree', 'OK', 'Got it', 'Continue', 'Принять', 'Принять все', 'Разрешить', 'Согласен', 'ОК']
         clicked = False
+        cookie_found = False
         
         btns = page.locator("button:visible, [role='button']:visible, a.button:visible")
         for i in range(btns.count()):
             btn = btns.nth(i)
             txt = (btn.inner_text() or "").strip()
+            if not txt: continue
             if is_cookie_settings(txt):
-                log_func(f"cookie_skipped_settings=true | text: {txt}")
+                cookie_found = True
                 continue
             
-            if any(w.lower() in txt.lower() for w in whitelist):
-                log_func(f"cookie_action=clicked_button | text: {txt}")
-                btn.click(force=True, timeout=1000)
+            lower_txt = txt.lower()
+            if any(w.lower() == lower_txt or w.lower() in lower_txt for w in whitelist):
+                cookie_found = True
+                try:
+                    btn.click(timeout=1000)
+                    log_func(f"cookie_action=clicked_normal | text: {txt}")
+                except:
+                    btn.click(force=True, timeout=1000)
+                    log_func(f"cookie_action=clicked_force | text: {txt}")
                 clicked = True; break
         
-        # 2. Fallback: hide banner via JS if it's still there (Blacklist selectors)
-        page.evaluate("""
-            const sel = ['#onetrust-banner-sdk', '.onetrust-pc-dark-filter', '#consent_blackbar', '.cookie-consent', '[id*="cookie" i]', '[class*="cookie" i]', '[class*="Consent" i]'];
-            sel.forEach(s => { 
-                const el = document.querySelector(s); 
-                if(el) {
-                    const t = el.innerText.toLowerCase();
-                    const primary = ['continue', 'next', 'submit', 'get my plan', 'claim', 'spin', 'start'];
-                    if (!primary.some(w => t.includes(w))) {
+        hidden_provider = page.evaluate("""() => {
+            const providers = [
+                '#onetrust-banner-sdk', '#onetrust-accept-btn-handler', '.onetrust-close-btn-handler',
+                '#truste-consent-track', '#consent_blackbar',
+                '.qc-cmp2-container', '.qc-cmp2-summary-buttons button',
+                '#cookie-law-info-bar', '#cookie_action_close_header', '.cky-btn-accept'
+            ];
+            let hidden = false;
+            providers.forEach(s => { 
+                document.querySelectorAll(s).forEach(el => {
+                    if (el.style.display !== 'none') {
                         el.style.display = 'none';
+                        hidden = true;
+                    }
+                });
+            });
+            return hidden;
+        }""")
+        
+        if hidden_provider:
+            cookie_found = True
+            log_func(f"cookie_action=hidden_provider_css")
+
+        hidden_fallback = page.evaluate("""() => {
+            let hidden = false;
+            const els = Array.from(document.querySelectorAll('*')).filter(el => {
+                const style = window.getComputedStyle(el);
+                return (style.position === 'fixed' || style.position === 'sticky') && style.display !== 'none';
+            });
+            
+            els.forEach(el => {
+                const t = el.innerText.toLowerCase();
+                if (t.includes('cookie') || t.includes('consent') || t.includes('privacy')) {
+                    const primary = ['continue', 'next', 'submit', 'get my plan', 'claim', 'spin', 'start'];
+                    if (!primary.some(w => t.includes(w))) { 
+                        el.style.display = 'none'; 
+                        hidden = true;
                     }
                 }
             });
-        """)
-        if not clicked:
-            # We don't log "hidden" every time to avoid noise, but the logic is active
-            pass
+            return hidden;
+        }""")
+        
+        if hidden_fallback:
+            cookie_found = True
+            log_func(f"cookie_action=hidden_fallback_css")
+        
+        if cookie_found:
+            log_func(f"cookie_found=true")
+            
     except: pass
+
 
 def ensure_privacy_checkbox_checked(page: Page, log_func) -> bool:
     try:
@@ -148,16 +189,19 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
         if screen_type == 'checkout': return "checkout reached"
         
         if screen_type == 'email':
-            ensure_privacy_checkbox_checked(page, log_func)
+            checked = ensure_privacy_checkbox_checked(page, log_func)
+            if checked: log_func("privacy_policy_checked=true")
             email_input = page.locator("input:visible").first
             email_input.fill(f"testuser{int(time.time())}@gmail.com")
+            time.sleep(0.5)
             btn = find_continue_button(page)
             if btn:
                 log_func(f"Clicking email continue: {btn.inner_text()}")
+                close_popups(page, log_func)
                 btn.click(force=True, timeout=1000)
             else: page.keyboard.press("Enter")
             log_func("Email submitted. Waiting for transition...")
-            wait_for_transition(page, start_url, start_hash, timeout=10.0)
+            wait_for_transition(page, start_url, start_hash, timeout=12.0)
             return "email_submitted"
             
         if screen_type == 'question':
@@ -165,6 +209,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             # Priority to "Start" buttons
             if cont_btn and any(k in (cont_btn.inner_text() or "").lower() for k in ["start", "get my", "get started", "take the", "offer"]):
                 log_func(f"Landing/Start button found: {cont_btn.inner_text()}. Clicking...")
+                close_popups(page, log_func)
                 cont_btn.click(force=True, timeout=1000)
                 wait_for_transition(page, start_url, start_hash)
                 return "start_button_pressed"
@@ -189,6 +234,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             if not target:
                 if cont_btn:
                     log_func(f"No choices with text, clicking continue: {cont_btn.inner_text()}")
+                    close_popups(page, log_func)
                     cont_btn.click(force=True, timeout=1000)
                     wait_for_transition(page, start_url, start_hash)
                     return "info_continue_pressed"
@@ -197,6 +243,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             # 1. Click choice
             log_func(f"Clicking choice: {target.inner_text()[:50].strip()}")
             target.scroll_into_view_if_needed()
+            close_popups(page, log_func)
             target.click(force=True, timeout=2000)
             time.sleep(1.5)
             
@@ -208,6 +255,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                 curr_cont = find_continue_button(page)
                 if curr_cont and curr_cont.is_enabled():
                     log_func(f"Continue button found after choice: {curr_cont.inner_text()}. Clicking...")
+                    close_popups(page, log_func)
                     curr_cont.click(force=True, timeout=1000)
                     break
                 time.sleep(0.5)
@@ -223,8 +271,10 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                             curr = els.nth(i)
                             txt = (curr.inner_text() or "").strip()
                             if txt and not re.search(r'^\d+\s*/\s*\d+$', txt) and not is_cookie_settings(txt):
+                                close_popups(page, log_func)
                                 curr.click(force=True, timeout=500)
                                 if curr_cont.is_enabled():
+                                    close_popups(page, log_func)
                                     curr_cont.click(force=True, timeout=1000)
                                     return "multiselect_completed"
             

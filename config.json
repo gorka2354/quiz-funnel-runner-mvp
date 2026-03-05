@@ -1,8 +1,9 @@
 {
  "funnels": [
-  "https://madmuscles.com/funnel/default-uni-soft-new/step-one"
+  "https://coursiv.io/dynamic?prc_id=1069",
+  "https://coursiv.io/dynamic"
  ],
  "headless": true,
- "max_steps": 40,
- "slow_mo_ms": 0
+ "max_steps": 80,
+ "slow_mo_ms": 100
 }
