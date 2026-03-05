@@ -264,10 +264,16 @@ def classify_screen(page: Page, log_func):
     if inputs.count() >= 1: return debug_return('input', f"{inputs.count()} input(s) found")
 
     # 5. Question vs Info (Smart separation)
-    nav_words = ["next", "continue", "skip", "back", "weiter", "zurück", "next step", "proceed", "got it", "ok", "принять", "ок"]
+    nav_words = [
+        "next", "continue", "skip", "back", "weiter", "zurück", "next step", "proceed", 
+        "got it", "ok", "okay", "great", "understood", "yes", "i'm in", "let's go", 
+        "see results", "start", "принять", "ок", "начать", "понятно", "хорошо",
+        "do it", "ready", "begin", "let's", "go", "transformation"
+    ]
     
     # Get all potential interactive elements
-    raw_els = page.locator("[data-testid*='answer' i]:visible, [class*='Card' i]:not([class*='testimonial' i]):not([class*='review' i]):visible, label:visible, button:visible, a.button:visible, [role='button']:visible")
+    # Broaden selectors to include 'a' and 'div[role="button"]' as requested
+    raw_els = page.locator("[data-testid*='answer' i]:visible, [class*='Card' i]:not([class*='testimonial' i]):not([class*='review' i]):visible, label:visible, button:visible, a:visible, [role='button']:visible, div[role='button']:visible")
     
     choices = []
     nav_btns = []
@@ -284,10 +290,17 @@ def classify_screen(page: Page, log_func):
                 choices.append("empty_choice")
             continue
 
-        if any(w == txt or txt.startswith(w + " ") for w in nav_words):
+        # Check if the text matches any navigation keyword
+        is_nav = False
+        for w in nav_words:
+            if txt == w or txt.startswith(w + "!") or txt.startswith(w + ".") or (len(txt) < 20 and w in txt):
+                is_nav = True
+                break
+        
+        if is_nav:
             nav_btns.append(txt)
         else:
-            # Even short or numeric texts can be choices (e.g., "1", "2", "3" or "10%")
+            # Even short or numeric texts can be choices
             choices.append(txt)
 
     # Logic rules
@@ -297,12 +310,15 @@ def classify_screen(page: Page, log_func):
     if len(choices) == 1 and len(nav_btns) >= 1:
         return debug_return('question', "Gated question: choice + next button")
         
-    if len(nav_btns) >= 1:
-        return debug_return('info', "Only navigation buttons found")
+    if len(nav_btns) >= 1 and len(choices) == 0:
+        return debug_return('info', f"Info screen: 0 choices, {len(nav_btns)} CTA button(s) found")
 
     # Fallback for questions without clear buttons
     if "?" in t or re.search(r'\d+/\d+', t):
         return debug_return('question', "Question mark or progress detected")
+
+    if len(nav_btns) >= 1:
+        return debug_return('info', "Fallback info: navigation buttons found")
 
     return debug_return('other', "No clear type detected")
 
