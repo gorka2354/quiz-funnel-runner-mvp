@@ -4,7 +4,11 @@ from playwright.sync_api import sync_playwright, Page, TimeoutError
 
 def get_slug(url: str):
     p = urlparse(url); d = p.netloc.replace('www.', ''); pth = p.path.strip('/').replace('/', '-')
-    return f"{d}-{pth}" if pth else d
+    slug = f"{d}-{pth}" if pth else d
+    if p.query:
+        q_hash = hashlib.md5(p.query.encode()).hexdigest()[:6]
+        slug = f"{slug}-{q_hash}"
+    return slug
 
 def get_screen_hash(page: Page):
     try:
@@ -47,6 +51,10 @@ def classify_screen(page: Page, log_func):
     except: pass
     u = page.url.lower()
     
+    # Site-specific for Coursiv
+    if "coursiv.io" in u and "selling-page" in u:
+        return 'paywall'
+
     if any(k in t for k in ["card number", "cvv", "mm/yy", "confirm payment"]) or page.locator("input[name*='card']").count() > 0:
         return 'checkout'
 
@@ -197,9 +205,22 @@ def run_funnel(url: str, config: dict, is_headless: bool):
                 
                 step += 1
             browser.close()
-    with open(os.path.join('results', 'summary.json'), 'w', encoding='utf-8') as f:
-        json.dump([summary], f, indent=4)
+    # Remove the overwrite inside run_funnel and return summary
+    return summary
 
 if __name__ == '__main__':
-    with open('config.json', 'r') as f: config = json.load(f)
-    run_funnel("https://coursiv.io/dynamic?prc_id=1069", config, config.get('headless', True))
+    with open('config.json', 'r') as f:
+        config = json.load(f)
+    
+    all_summaries = []
+    for url in config.get('funnels', []):
+        print(f"\n--- Starting funnel: {url} ---")
+        summary = run_funnel(url, config, config.get('headless', True))
+        all_summaries.append(summary)
+    
+    with open(os.path.join('results', 'summary.json'), 'w', encoding='utf-8') as f:
+        json.dump(all_summaries, f, indent=4)
+    
+    print("\nBatch run completed.")
+    for s in all_summaries:
+        print(f"URL: {s['url']} | Paywall reached: {s['paywall_reached']} | Steps: {s['steps_total']}")
