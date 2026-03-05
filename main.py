@@ -9,10 +9,86 @@ COOKIE_BLACKLIST = [
     "manage", "preferences"
 ]
 
-def is_cookie_settings(text: str) -> bool:
-    if not text: return False
-    t = text.lower()
-    return any(word in t for word in COOKIE_BLACKLIST)
+SHARE_BLACKLIST = [
+    "share", "sharing", "tell a friend", "invite", "recommend",
+    "поделиться", "поделись", "рассказать", "пригласить"
+]
+
+def is_forbidden_button(el, log_func=None) -> bool:
+    try:
+        txt = (el.inner_text() or "").lower()
+        alabel = (el.get_attribute("aria-label") or "").lower()
+        cls = (el.get_attribute("class") or "").lower()
+        
+        full_text = f"{txt} {alabel} {cls}"
+        
+        forbidden = False
+        reason = ""
+        if any(word in full_text for word in COOKIE_BLACKLIST): 
+            forbidden = True; reason = "cookie"
+        if any(word in full_text for word in SHARE_BLACKLIST): 
+            forbidden = True; reason = "share"
+            
+        if forbidden and log_func:
+            log_func(f"forbidden_skipped={reason} | text: {txt[:30]}")
+        return forbidden
+    except: return False
+
+def get_choices_text(page: Page, log_func=None):
+    try:
+        choice_sel = [
+            "[data-testid*='answer' i]:visible", 
+            "button:visible", 
+            "[class*='Item' i]:visible", 
+            "[class*='Card' i]:visible", 
+            "label:visible"
+        ]
+        for s in choice_sel:
+            els = page.locator(s)
+            texts = []
+            for i in range(els.count()):
+                curr = els.nth(i)
+                if is_forbidden_button(curr, log_func): continue
+                txt = (curr.inner_text() or "").strip()
+                if txt and not re.search(r'\d+\s*/\s*\d+', txt) and len(txt) < 100:
+                    texts.append(txt)
+            if texts:
+                return "|".join(texts[:3])
+        return ""
+    except: return ""
+
+def get_ui_step(page: Page):
+    try:
+        # Improved regex: exclude common 24/7, and require first number <= second number
+        def extract_step(text):
+            matches = re.finditer(r'(\d+)\s*/\s*(\d+)', text)
+            for m in matches:
+                curr, total = int(m.group(1)), int(m.group(2))
+                if total > 5 and curr <= total and f"{curr}/{total}" != "24/7":
+                    return f"{curr}/{total}"
+            return None
+
+        # Look in visible text first
+        t = page.evaluate("() => document.body.innerText")
+        res = extract_step(t)
+        if res: return res
+        
+        # Look in all elements if not found
+        res = page.evaluate(r"""() => {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            while(node = walker.nextNode()) {
+                const m = node.textContent.match(/(\d+)\s*\/\s*(\d+)/);
+                if (m) {
+                    const c = parseInt(m[1]), t = parseInt(m[2]);
+                    if (t > 5 && c <= t && m[0].trim() !== "24/7") return m[0].trim();
+                }
+            }
+            return null;
+        }""")
+        if res: return res.replace(" ", "")
+    except: pass
+    return "unknown"
 
 def get_slug(url: str):
     p = urlparse(url); d = p.netloc.replace('www.', ''); pth = p.path.strip('/').replace('/', '-')
@@ -30,7 +106,7 @@ def get_screen_hash(page: Page):
 
 def close_popups(page: Page, log_func):
     try:
-        whitelist = ['Accept', 'Accept all', 'Allow all', 'I agree', 'Agree', 'OK', 'Got it', 'Continue', 'Принять', 'Принять все', 'Разрешить', 'Согласен', 'ОК']
+        whitelist = ['Accept', 'Accept all', 'Allow all', 'I agree', 'Agree', 'Принять', 'Принять все', 'Разрешить', 'Согласен', 'Alle akzeptieren', 'Alle ablehnen']
         clicked = False
         cookie_found = False
         
@@ -39,7 +115,7 @@ def close_popups(page: Page, log_func):
             btn = btns.nth(i)
             txt = (btn.inner_text() or "").strip()
             if not txt: continue
-            if is_cookie_settings(txt):
+            if is_forbidden_button(btn, log_func):
                 cookie_found = True
                 continue
             
@@ -206,7 +282,12 @@ def classify_screen(page: Page, log_func):
         "button:visible"
     ]
     choices_count = 0
-    nav_kws = ['next', 'continue', 'start', 'yes', "i'm in", "got it", "let's go", "see results", "back", "accept", "allow", "skip", "submit", "weiter", "zurück", "claim", "discount", "get", "spin", "alle", "reject", "decline", "agree", "nur", "only"]
+    exact_ignore = [
+        "next", "continue", "back", "skip", "submit", "weiter", "zurück", "next step", "proceed",
+        "accept", "allow", "reject", "decline", "agree", "got it", "ok",
+        "accept all", "allow all", "reject all", "decline all", "alle akzeptieren", "alle ablehnen",
+        "nur notwendige", "essential only", "only necessary", "принять", "принять все", "разрешить", "ок"
+    ]
 
     for s in choice_sel:
         try:
@@ -218,13 +299,11 @@ def classify_screen(page: Page, log_func):
                 # Ignore purely numeric or percentage texts (e.g., on a prize wheel or pricing cards)
                 if re.fullmatch(r'[\d%.,\s\-+]+', el_txt) or len(el_txt) < 3:
                     continue
-                # Ignore purely navigational or cookie buttons
-                is_nav = False
-                for kw in nav_kws:
-                    if el_txt == kw or el_txt.startswith(kw) or is_cookie_settings(el_txt) or "cookie" in el_txt:
-                        is_nav = True; break
-                if not is_nav:
-                    cnt += 1
+                # Ignore strictly navigational or cookie buttons
+                if el_txt in exact_ignore or is_cookie_settings(el_txt) or "cookie" in el_txt:
+                    continue
+
+                cnt += 1
             if cnt >= 2:
                 choices_count = cnt
                 break
@@ -260,7 +339,7 @@ def classify_screen(page: Page, log_func):
     # 7. Other
     return debug_return('other', "Fell through all rules")
 
-def find_continue_button(page: Page):
+def find_continue_button(page: Page, log_func=None):
     keywords = [
         'Continue', 'Next', 'Get my plan', 'Start', 'Got it', 'Take the quiz', 
         'Get started', 'Start quiz', 'Get my offer', 'Next step', 'Proceed', 
@@ -269,8 +348,7 @@ def find_continue_button(page: Page):
     for text in keywords:
         btn = page.get_by_text(text, exact=False).first
         if btn.is_visible(timeout=500):
-            txt = (btn.inner_text() or "").strip()
-            if not is_cookie_settings(txt): return btn
+            if not is_forbidden_button(btn, log_func): return btn
 
     # We purposefully do not fallback to random buttons here, as it causes 
     # the bot to mistakenly click choice variants as 'Next' buttons.
@@ -284,40 +362,34 @@ def wait_for_transition(page: Page, old_url: str, old_hash: str, timeout=10.0):
         time.sleep(0.5)
     return False
 
-def get_question_text(page: Page):
-    try:
-        els = page.locator("h1:visible, h2:visible, h3:visible, [class*='title' i]:visible, [class*='heading' i]:visible")
-        for i in range(els.count()):
-            txt = (els.nth(i).inner_text() or "").strip()
-            if len(txt) > 2: return txt
-        return ""
-    except: return ""
-
 def perform_action(page: Page, screen_type: str, log_func, results_dir: str, start_hash: str, start_url: str):
     try:
         if screen_type == 'paywall': return "stopped at paywall"
         if screen_type == 'checkout': return "checkout reached"
 
-        if screen_type == 'email':
+        if screen_type in ['email', 'input']:
             checked = ensure_privacy_checkbox_checked(page, log_func)
             if checked: log_func("privacy_policy_checked=true")
             email_input = page.locator("input:visible").first
             email_input.fill(f"testuser{int(time.time())}@gmail.com")
             time.sleep(0.5)
-            btn = find_continue_button(page)
+            btn = find_continue_button(page, log_func)
             if btn:
                 log_func(f"Clicking email continue: {btn.inner_text()}")
                 close_popups(page, log_func)
-                btn.click(force=True, timeout=1000)
+                try:
+                    btn.click(force=True, timeout=2000)
+                except:
+                    page.keyboard.press("Enter")
             else: page.keyboard.press("Enter")
             log_func("Email submitted. Waiting for transition...")
             wait_for_transition(page, start_url, start_hash, timeout=12.0)
             return "email_submitted"
 
-        if screen_type in ['question', 'info', 'input', 'other']:
-            cont_btn = find_continue_button(page)
+        if screen_type in ['question', 'info', 'other']:
+            cont_btn = find_continue_button(page, log_func)
             # Priority to "Start" buttons
-            if cont_btn and any(k in (cont_btn.inner_text() or "").lower() for k in ["start", "get my", "get started", "take the", "offer"]):
+            if cont_btn and any(k in (cont_btn.inner_text() or "").lower() for k in ["start", "get my", "get started", "take the", "offer", "claim", "discount", "spin"]):
                 log_func(f"Landing/Start button found: {cont_btn.inner_text()}. Clicking...")
                 close_popups(page, log_func)
                 cont_btn.click(force=True, timeout=1000)
@@ -337,7 +409,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                 for i in range(els.count()):
                     curr = els.nth(i)
                     txt = (curr.inner_text() or "").strip()
-                    if txt and not re.search(r'^\d+\s*/\s*\d+$', txt) and len(txt) < 100 and not is_cookie_settings(txt):
+                    if txt and not re.search(r'^\d+\s*/\s*\d+$', txt) and len(txt) < 100 and not is_forbidden_button(curr, log_func):
                         target = curr; break
                 if target: break
 
@@ -350,33 +422,56 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     return "info_continue_pressed"
                 return "no_choices_found"
 
-            start_q_text = get_question_text(page)
-
+            start_choices = get_choices_text(page, log_func)
+            start_ui = get_ui_step(page)
             # 1. Click choice
             log_func(f"Clicking choice: {target.inner_text()[:50].strip()}")
-            target.scroll_into_view_if_needed()
+            try:
+                target.scroll_into_view_if_needed(timeout=2000)
+            except: pass
             close_popups(page, log_func)
-            target.click(force=True, timeout=2000)
-            time.sleep(1.0)
+            try:
+                target.click(force=True, timeout=2000)
+            except Exception as e:
+                log_func(f"Click error: {str(e)[:50]}")
+            
+            # Short wait for auto-advance or progress change
+            log_func("Waiting for auto-transition...")
+            start_wait = time.time()
+            transitioned_auto = False
+            while time.time() - start_wait < 2.0:
+                curr_ui = get_ui_step(page)
+                curr_hash = get_screen_hash(page)
+                if curr_ui != start_ui or curr_hash != start_hash:
+                    log_func(f"Auto-transition detected (ui_step: {start_ui} -> {curr_ui})")
+                    transitioned_auto = True
+                    break
+                time.sleep(0.3)
+            
+            if transitioned_auto:
+                return "auto_advanced"
 
-            # 2. Wait for auto-transition or Next button
+            # 2. Wait for Next button if no auto-advance
             start_time = time.time()
             clicked_continue = False
-            while time.time() - start_time < 5.0:
-                curr_q_text = get_question_text(page)
-                if start_q_text and curr_q_text and curr_q_text != start_q_text:
-                    # Content significantly changed, we transitioned!
+            while time.time() - start_time < 3.0:
+                curr_choices = get_choices_text(page, log_func)
+                curr_ui = get_ui_step(page)
+                if (start_choices and curr_choices and curr_choices != start_choices) or (curr_ui != start_ui):
                     break
 
-                if not start_q_text and page.url != start_url:
+                # Safe URL check: only break if the PATH changes
+                if urlparse(page.url).path != urlparse(start_url).path:
                     break 
 
-                curr_cont = find_continue_button(page)
+                curr_cont = find_continue_button(page, log_func)
                 if curr_cont and curr_cont.is_enabled():
-                    log_func(f"Continue button found after choice: {curr_cont.inner_text()}. Clicking...")
+                    log_func(f"Continue button found: {curr_cont.inner_text()}. Clicking...")
                     close_popups(page, log_func)
                     pre_cont_hash = get_screen_hash(page)
-                    curr_cont.click(force=True, timeout=1000)
+                    try:
+                        curr_cont.click(force=True, timeout=2000)
+                    except: pass
                     clicked_continue = True
                     wait_for_transition(page, page.url, pre_cont_hash, timeout=10.0)
                     return "continue_clicked"
@@ -384,7 +479,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
 
             # 3. Multiselect
             if not clicked_continue:
-                curr_cont = find_continue_button(page)
+                curr_cont = find_continue_button(page, log_func)
                 if curr_cont and not curr_cont.is_enabled():
                     log_func("Multiselect detected. Selecting more options...")
                     for s in choice_sel:
@@ -392,7 +487,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                         for i in range(1, min(els.count(), 5)):
                             curr = els.nth(i)
                             txt = (curr.inner_text() or "").strip()
-                            if txt and not re.search(r'^\d+\s*/\s*\d+$', txt) and not is_cookie_settings(txt):
+                            if txt and not re.search(r'^\d+\s*/\s*\d+$', txt) and not is_forbidden_button(curr, log_func):
                                 close_popups(page, log_func)
                                 curr.click(force=True, timeout=500)
                                 if curr_cont.is_enabled():
@@ -421,18 +516,19 @@ def run_funnel(url: str, config: dict, is_headless: bool):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=is_headless, slow_mo=100)
             page = browser.new_context(**p.devices['iPhone 13']).new_page()
-            log(f"Navigating to {url}"); page.goto(url, wait_until='load', timeout=60000)
+            log(f"Navigating to {url} (slug: {slug})"); page.goto(url, wait_until='load', timeout=60000)
             
             step, history = 1, []
             while step <= 80:
                 curr_u = page.url
                 if any(k in curr_u for k in ["magic", "analyzing", "loading"]): 
-                    time.sleep(12); curr_u = page.url
+                    time.sleep(15); curr_u = page.url
                 
                 close_popups(page, log)
                 time.sleep(1)
                 curr_h = get_screen_hash(page)
                 st = classify_screen(page, log)
+                ui_before = get_ui_step(page)
                 
                 curr_id = f"{curr_u}|{curr_h}"
                 if history.count(curr_id) >= 3:
@@ -444,8 +540,25 @@ def run_funnel(url: str, config: dict, is_headless: bool):
                 page.screenshot(path=local_path, full_page=True)
                 shutil.copy2(local_path, os.path.join(classified_dir, st, f"{slug}__{screen_name}"))
                 
+                log(f"step:{step} | type:{st} | ui_step:{ui_before} | url:{page.url[:60]}")
                 act = perform_action(page, st, log, res_dir, curr_h, curr_u)
-                log(f"step:{step} | type:{st} | action:{act} | url:{page.url[:60]}")
+                
+                # Check for double skip
+                time.sleep(1)
+                ui_after = get_ui_step(page)
+                
+                def parse_ui(s):
+                    if not s or s == "unknown": return -1
+                    m = re.match(r'(\d+)', s)
+                    return int(m.group(1)) if m else -1
+                
+                ui_b_num = parse_ui(ui_before)
+                ui_a_num = parse_ui(ui_after)
+                
+                if ui_a_num > ui_b_num + 1 and ui_b_num > 0:
+                    log(f"skip_detected=true | UI jumped from {ui_before} to {ui_after}")
+                
+                log(f"action_result:{act}")
                 
                 summary["steps_total"] = step; summary["last_url"] = page.url
                 if st in ['paywall', 'checkout'] or "stopped" in act or "reached" in act:
