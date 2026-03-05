@@ -11,7 +11,8 @@ COOKIE_BLACKLIST = [
 
 SHARE_BLACKLIST = [
     "share", "sharing", "tell a friend", "invite", "recommend",
-    "поделиться", "поделись", "рассказать", "пригласить"
+    "поделиться", "поделись", "рассказать", "пригласить",
+    "view more", "show less", "read more", "back", "zurück", "назад"
 ]
 
 def is_forbidden_button(el, log_func=None) -> bool:
@@ -19,16 +20,26 @@ def is_forbidden_button(el, log_func=None) -> bool:
         txt = (el.inner_text() or "").lower()
         alabel = (el.get_attribute("aria-label") or "").lower()
         cls = (el.get_attribute("class") or "").lower()
-        
-        full_text = f"{txt} {alabel} {cls}"
-        
+        html = (el.evaluate("el => el.innerHTML") or "").lower()
+
+        full_text = f"{txt} {alabel} {cls} {html}"
+
         forbidden = False
         reason = ""
         if any(word in full_text for word in COOKIE_BLACKLIST): 
             forbidden = True; reason = "cookie"
-        if any(word in full_text for word in SHARE_BLACKLIST): 
-            forbidden = True; reason = "share"
-            
+
+        # Use regex with word boundaries for ALL forbidden words to avoid false positives
+        forbidden_words = [
+            "share", "sharing", "tell a friend", "invite", "recommend",
+            "поделиться", "поделись", "рассказать", "пригласить",
+            "view more", "show less", "read more", "back", "zurück", "назад"
+        ]
+        pattern = r'\b(' + '|'.join(re.escape(w) for w in forbidden_words) + r')\b'
+
+        if re.search(pattern, full_text):
+            forbidden = True; reason = "forbidden_ui"
+
         if forbidden and log_func:
             log_func(f"forbidden_skipped={reason} | text: {txt[:30]}")
         return forbidden
@@ -59,11 +70,14 @@ def get_choices_text(page: Page, log_func=None):
 
 def get_ui_step(page: Page):
     try:
-        # Improved regex: exclude common 24/7, and require first number <= second number
+        # Improved regex: require total >= 10 to avoid 24/7, or ensure current <= total
         def extract_step(text):
+            # Look for patterns like "3 / 23" or "3/23"
             matches = re.finditer(r'(\d+)\s*/\s*(\d+)', text)
             for m in matches:
                 curr, total = int(m.group(1)), int(m.group(2))
+                # Heuristic: quiz progress usually has total > 5 and curr <= total
+                # and we specifically ignore 24/7
                 if total > 5 and curr <= total and f"{curr}/{total}" != "24/7":
                     return f"{curr}/{total}"
             return None
@@ -260,13 +274,20 @@ def classify_screen(page: Page, log_func):
     
     for i in range(raw_els.count()):
         el = raw_els.nth(i)
-        if is_forbidden_button(el): continue
+        if is_forbidden_button(el, log_func): continue
         txt = (el.inner_text() or "").lower().strip()
-        if not txt or re.fullmatch(r'[\d%.,\s\-+]+', txt) or len(txt) < 2: continue
         
+        # If element is visible and interactive but has no text (like cups in DanceBit), it's likely a choice
+        if not txt:
+            tag = el.evaluate("el => el.tagName").lower()
+            if tag in ['button', 'label', 'input']:
+                choices.append("empty_choice")
+            continue
+
         if any(w == txt or txt.startswith(w + " ") for w in nav_words):
             nav_btns.append(txt)
         else:
+            # Even short or numeric texts can be choices (e.g., "1", "2", "3" or "10%")
             choices.append(txt)
 
     # Logic rules
@@ -290,12 +311,18 @@ def find_continue_button(page: Page, log_func=None):
     keywords = [
         'Continue', 'Next', 'Get my plan', 'Start', 'Got it', 'Take the quiz', 
         'Get started', 'Start quiz', 'Get my offer', 'Next step', 'Proceed', 
-        'Submit', 'Show my results', 'See my results'
+        'Submit', 'Show my results', 'See my results', "Let's", "Do it", "I'm in"
     ]
+    # Restrict to actual interactive elements to avoid picking up headlines/prompts
+    button_locator = page.locator("button:visible, [role='button']:visible, a.button:visible, a:visible")
+    
     for text in keywords:
-        btn = page.get_by_text(text, exact=False).first
-        if btn.is_visible(timeout=500):
-            if not is_forbidden_button(btn, log_func): return btn
+        # We search within buttons/links for the text
+        btns = button_locator.get_by_text(text, exact=False)
+        if btns.count() > 0:
+            btn = btns.first
+            if btn.is_visible(timeout=500):
+                if not is_forbidden_button(btn, log_func): return btn
 
     # We purposefully do not fallback to random buttons here, as it causes 
     # the bot to mistakenly click choice variants as 'Next' buttons.
@@ -309,6 +336,17 @@ def wait_for_transition(page: Page, old_url: str, old_hash: str, timeout=10.0):
         time.sleep(0.5)
     return False
 
+NAV_KEYWORDS = [
+    "next", "continue", "skip", "back", "weiter", "zurück", "next step", "proceed", 
+    "got it", "ok", "принять", "ок", "start", "get started", "take the quiz", 
+    "accept", "allow", "agree", "alle akzeptieren", "alle ablehnen"
+]
+
+def is_nav_button(text: str) -> bool:
+    if not text: return False
+    t = text.lower().strip()
+    return any(w == t or t.startswith(w + " ") for w in NAV_KEYWORDS)
+
 def perform_action(page: Page, screen_type: str, log_func, results_dir: str, start_hash: str, start_url: str):
     try:
         if screen_type == 'paywall': return "stopped at paywall"
@@ -317,21 +355,54 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
         if screen_type in ['email', 'input']:
             checked = ensure_privacy_checkbox_checked(page, log_func)
             if checked: log_func("privacy_policy_checked=true")
-            email_input = page.locator("input:visible").first
-            email_input.fill(f"testuser{int(time.time())}@gmail.com")
-            time.sleep(0.5)
+            
+            # Wait for inputs to be visible
+            try: page.wait_for_selector("input:visible, textarea:visible", timeout=3000)
+            except: pass
+            
+            inputs = page.locator("input:visible, textarea:visible")
+            for i in range(inputs.count()):
+                inp = inputs.nth(i)
+                itype = (inp.get_attribute("type") or "text").lower()
+                placeholder = (inp.get_attribute("placeholder") or "").lower()
+                
+                val = "John"
+                if screen_type == 'email' or any(k in placeholder for k in ["email", "e-mail"]):
+                    val = f"testuser{int(time.time())}@gmail.com"
+                
+                context_text = (page.evaluate("() => document.body.innerText") or "").lower()
+                context_url = page.url.lower()
+                
+                # Use word boundaries for numeric keywords to avoid false positives like 'age' in 'magic-page'
+                num_pattern = r'\b(age|height|weight|возраст|рост|вес|bmi|goal|цель)\b'
+                is_numeric = itype == "number" or re.search(num_pattern, placeholder) or re.search(num_pattern, context_url)
+                
+                if is_numeric:
+                    if any(k in placeholder or k in context_url or k in context_text for k in ["height", "рост"]): val = "170"
+                    elif any(k in placeholder or k in context_url or k in context_text for k in ["goal", "цель"]): val = "60"
+                    elif any(k in placeholder or k in context_url or k in context_text for k in ["weight", "вес"]): val = "70"
+                    elif any(k in placeholder or k in context_url or k in context_text for k in ["age", "возраст"]): val = "30"
+                    else: val = "25"
+                
+                try:
+                    log_func(f"Filling input: itype={itype}, val={val}")
+                    inp.fill(val)
+                    time.sleep(0.3)
+                except Exception as e:
+                    log_func(f"Fill error: {str(e)[:50]}")
+
             btn = find_continue_button(page, log_func)
             if btn:
-                log_func(f"Clicking email continue: {btn.inner_text()}")
+                log_func(f"Clicking continue: {btn.inner_text()}")
                 close_popups(page, log_func)
                 try:
                     btn.click(force=True, timeout=2000)
                 except:
                     page.keyboard.press("Enter")
             else: page.keyboard.press("Enter")
-            log_func("Email submitted. Waiting for transition...")
+            log_func("Input submitted. Waiting for transition...")
             wait_for_transition(page, start_url, start_hash, timeout=12.0)
-            return "email_submitted"
+            return "input_submitted"
 
         if screen_type in ['question', 'info', 'other']:
             cont_btn = find_continue_button(page, log_func)
@@ -351,24 +422,38 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                 "label:visible"
             ]
             target = None
+            # Pass 1: Try all selectors to find a choice WITH text (excluding Nav)
             for s in choice_sel:
                 els = page.locator(s)
                 for i in range(els.count()):
                     curr = els.nth(i)
+                    if is_forbidden_button(curr, log_func): continue
                     txt = (curr.inner_text() or "").strip()
-                    if txt and not re.search(r'^\d+\s*/\s*\d+$', txt) and len(txt) < 100 and not is_forbidden_button(curr, log_func):
+                    if txt and not re.search(r'^\d+\s*/\s*\d+$', txt) and len(txt) < 100 and not is_nav_button(txt):
                         target = curr; break
                 if target: break
 
+            # Pass 2: If no text choices found, try all selectors for empty choices
+            if not target:
+                for s in choice_sel:
+                    els = page.locator(s)
+                    for i in range(els.count()):
+                        curr = els.nth(i)
+                        if is_forbidden_button(curr, log_func): continue
+                        if not (curr.inner_text() or "").strip():
+                            tag = curr.evaluate("el => el.tagName").lower()
+                            if tag in ['button', 'input']:
+                                target = curr; break
+                    if target: break
+
             if not target:
                 if cont_btn:
-                    log_func(f"No choices with text, clicking continue: {cont_btn.inner_text()}")
+                    log_func(f"No choices, clicking continue: {cont_btn.inner_text()}")
                     close_popups(page, log_func)
                     cont_btn.click(force=True, timeout=1000)
                     wait_for_transition(page, start_url, start_hash)
                     return "info_continue_pressed"
                 return "no_choices_found"
-
             start_choices = get_choices_text(page, log_func)
             start_ui = get_ui_step(page)
             # 1. Click choice
@@ -468,7 +553,7 @@ def run_funnel(url: str, config: dict, is_headless: bool):
             step, history = 1, []
             while step <= 80:
                 curr_u = page.url
-                if any(k in curr_u for k in ["magic", "analyzing", "loading"]): 
+                if any(k in curr_u for k in ["magic", "analyzing", "loading", "preparePlan"]): 
                     time.sleep(15); curr_u = page.url
                 
                 close_popups(page, log)
@@ -521,7 +606,12 @@ if __name__ == '__main__':
         config = json.load(f)
     
     all_summaries = []
-    for url in config.get('funnels', []):
+    funnels = config.get('funnels', [])
+    max_f = config.get('max_funnels')
+    if max_f is not None:
+        funnels = funnels[:max_f]
+        
+    for url in funnels:
         print(f"\n--- Starting funnel: {url} ---")
         summary = run_funnel(url, config, config.get('headless', True))
         all_summaries.append(summary)
