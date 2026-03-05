@@ -157,22 +157,19 @@ def classify_screen(page: Page, log_func):
     return 'question'
 
 def find_continue_button(page: Page):
-    keywords = ['Continue', 'Next', 'Get my plan', 'Start', 'Got it', 'Take the quiz', 'Get started', 'Start quiz', 'Get my offer', 'Next step', 'Proceed']
+    keywords = [
+        'Continue', 'Next', 'Get my plan', 'Start', 'Got it', 'Take the quiz', 
+        'Get started', 'Start quiz', 'Get my offer', 'Next step', 'Proceed', 
+        'Submit', 'Show my results', 'See my results'
+    ]
     for text in keywords:
         btn = page.get_by_text(text, exact=False).first
         if btn.is_visible(timeout=500):
             txt = (btn.inner_text() or "").strip()
-            if not is_cookie_settings(txt):
-                return btn
-    
-    # Last resort: visible buttons that are NOT settings
-    btns = page.locator("button:visible, [role='button']:visible, a.button:visible, [class*='Button' i]:visible")
-    for i in range(btns.count() - 1, -1, -1):
-        btn = btns.nth(i)
-        if btn.is_visible(timeout=500):
-            txt = (btn.inner_text() or "").strip()
-            if txt and not is_cookie_settings(txt):
-                return btn
+            if not is_cookie_settings(txt): return btn
+
+    # We purposefully do not fallback to random buttons here, as it causes 
+    # the bot to mistakenly click choice variants as 'Next' buttons.
     return None
 
 def wait_for_transition(page: Page, old_url: str, old_hash: str, timeout=10.0):
@@ -245,10 +242,11 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             target.scroll_into_view_if_needed()
             close_popups(page, log_func)
             target.click(force=True, timeout=2000)
-            time.sleep(1.5)
+            time.sleep(1.0)
             
             # 2. Wait for auto-transition or Next button
             start_time = time.time()
+            clicked_continue = False
             while time.time() - start_time < 5.0:
                 if page.url != start_url: break 
                 
@@ -256,12 +254,15 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                 if curr_cont and curr_cont.is_enabled():
                     log_func(f"Continue button found after choice: {curr_cont.inner_text()}. Clicking...")
                     close_popups(page, log_func)
+                    pre_cont_hash = get_screen_hash(page)
                     curr_cont.click(force=True, timeout=1000)
-                    break
+                    clicked_continue = True
+                    wait_for_transition(page, start_url, pre_cont_hash, timeout=10.0)
+                    return "continue_clicked"
                 time.sleep(0.5)
 
             # 3. Multiselect
-            if page.url == start_url:
+            if page.url == start_url and not clicked_continue:
                 curr_cont = find_continue_button(page)
                 if curr_cont and not curr_cont.is_enabled():
                     log_func("Multiselect detected. Selecting more options...")
@@ -275,10 +276,12 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                                 curr.click(force=True, timeout=500)
                                 if curr_cont.is_enabled():
                                     close_popups(page, log_func)
+                                    pre_multi_hash = get_screen_hash(page)
                                     curr_cont.click(force=True, timeout=1000)
+                                    wait_for_transition(page, start_url, pre_multi_hash, timeout=10.0)
                                     return "multiselect_completed"
             
-            wait_for_transition(page, start_url, start_hash)
+            wait_for_transition(page, start_url, start_hash, timeout=5.0)
             return "screen_interaction_completed"
                 
     except Exception as e: return f"err:{str(e)}"
