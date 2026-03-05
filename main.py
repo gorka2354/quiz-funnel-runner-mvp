@@ -180,11 +180,20 @@ def wait_for_transition(page: Page, old_url: str, old_hash: str, timeout=10.0):
         time.sleep(0.5)
     return False
 
+def get_question_text(page: Page):
+    try:
+        els = page.locator("h1:visible, h2:visible, h3:visible, [class*='title' i]:visible, [class*='heading' i]:visible")
+        for i in range(els.count()):
+            txt = (els.nth(i).inner_text() or "").strip()
+            if len(txt) > 2: return txt
+        return ""
+    except: return ""
+
 def perform_action(page: Page, screen_type: str, log_func, results_dir: str, start_hash: str, start_url: str):
     try:
         if screen_type == 'paywall': return "stopped at paywall"
         if screen_type == 'checkout': return "checkout reached"
-        
+
         if screen_type == 'email':
             checked = ensure_privacy_checkbox_checked(page, log_func)
             if checked: log_func("privacy_policy_checked=true")
@@ -200,7 +209,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             log_func("Email submitted. Waiting for transition...")
             wait_for_transition(page, start_url, start_hash, timeout=12.0)
             return "email_submitted"
-            
+
         if screen_type == 'question':
             cont_btn = find_continue_button(page)
             # Priority to "Start" buttons
@@ -227,7 +236,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     if txt and not re.search(r'^\d+\s*/\s*\d+$', txt) and len(txt) < 100 and not is_cookie_settings(txt):
                         target = curr; break
                 if target: break
-            
+
             if not target:
                 if cont_btn:
                     log_func(f"No choices with text, clicking continue: {cont_btn.inner_text()}")
@@ -237,19 +246,27 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     return "info_continue_pressed"
                 return "no_choices_found"
 
+            start_q_text = get_question_text(page)
+
             # 1. Click choice
             log_func(f"Clicking choice: {target.inner_text()[:50].strip()}")
             target.scroll_into_view_if_needed()
             close_popups(page, log_func)
             target.click(force=True, timeout=2000)
             time.sleep(1.0)
-            
+
             # 2. Wait for auto-transition or Next button
             start_time = time.time()
             clicked_continue = False
             while time.time() - start_time < 5.0:
-                if page.url != start_url: break 
-                
+                curr_q_text = get_question_text(page)
+                if start_q_text and curr_q_text and curr_q_text != start_q_text:
+                    # Content significantly changed, we transitioned!
+                    break
+
+                if not start_q_text and page.url != start_url:
+                    break 
+
                 curr_cont = find_continue_button(page)
                 if curr_cont and curr_cont.is_enabled():
                     log_func(f"Continue button found after choice: {curr_cont.inner_text()}. Clicking...")
@@ -257,12 +274,12 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     pre_cont_hash = get_screen_hash(page)
                     curr_cont.click(force=True, timeout=1000)
                     clicked_continue = True
-                    wait_for_transition(page, start_url, pre_cont_hash, timeout=10.0)
+                    wait_for_transition(page, page.url, pre_cont_hash, timeout=10.0)
                     return "continue_clicked"
                 time.sleep(0.5)
 
             # 3. Multiselect
-            if page.url == start_url and not clicked_continue:
+            if not clicked_continue:
                 curr_cont = find_continue_button(page)
                 if curr_cont and not curr_cont.is_enabled():
                     log_func("Multiselect detected. Selecting more options...")
@@ -278,12 +295,11 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                                     close_popups(page, log_func)
                                     pre_multi_hash = get_screen_hash(page)
                                     curr_cont.click(force=True, timeout=1000)
-                                    wait_for_transition(page, start_url, pre_multi_hash, timeout=10.0)
+                                    wait_for_transition(page, page.url, pre_multi_hash, timeout=10.0)   
                                     return "multiselect_completed"
-            
+
             wait_for_transition(page, start_url, start_hash, timeout=5.0)
-            return "screen_interaction_completed"
-                
+            return "screen_interaction_completed"                
     except Exception as e: return f"err:{str(e)}"
     return "none"
 
