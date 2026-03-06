@@ -7,5 +7,5 @@
  "max_funnels": 3,
  "headless": true,
  "max_steps": 80,
- "slow_mo_ms": 100
+ "slow_mo_ms": 50
 }

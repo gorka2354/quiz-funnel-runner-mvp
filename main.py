@@ -1,6 +1,7 @@
 import json, argparse, os, time, re, hashlib, shutil
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Page, TimeoutError
+from concurrent.futures import ThreadPoolExecutor
 
 COOKIE_BLACKLIST = [
     "settings", "preferences", "customize", "options", "more info", 
@@ -252,7 +253,16 @@ def classify_screen(page: Page, log_func):
                 p = (inputs.nth(i).get_attribute("placeholder") or "").lower()
                 if any(k in p for k in ["email", "e-mail", "mail@"]): has_email_input = True; break
             except: pass
-    if has_email_input: return debug_return('email', "Email field found")
+
+    # If attributes are not enough, check if there is an input AND "email" keywords in text/URL
+    if not has_email_input and page.locator("input:not([type='hidden'])").count() > 0:
+        if any(k in t for k in ["email", "e-mail", "электронная почта", "адрес почты"]):
+            # Only if it's not a profile data screen (age, weight, etc.)
+            pd_kws = ["age", "height", "weight", "name", "рост", "вес", "возраст", "имя"]
+            if not any(k in t for k in pd_kws):
+                has_email_input = True
+
+    if has_email_input: return debug_return('email', "Email field found via attributes or text")
 
     # 4. Input (with animation safety)
     pd_kws = ["age", "height", "weight", "name", "cm", "kg", "years", "call you"]
@@ -570,7 +580,7 @@ def run_funnel(url: str, config: dict, is_headless: bool):
             while step <= 80:
                 curr_u = page.url
                 if any(k in curr_u for k in ["magic", "analyzing", "loading", "preparePlan"]): 
-                    time.sleep(15); curr_u = page.url
+                    time.sleep(10); curr_u = page.url
                 
                 close_popups(page, log)
                 time.sleep(1)
@@ -618,23 +628,41 @@ def run_funnel(url: str, config: dict, is_headless: bool):
     return summary
 
 if __name__ == '__main__':
-    with open('config.json', 'r') as f:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='config.json', help='Path to config file')
+    parser.add_argument('--parallel', action='store_true', help='Run funnels in parallel threads')
+    parser.add_argument('--headless', type=str, help='Override headless mode (true/false)')
+    args = parser.parse_args()
+
+    with open(args.config, 'r') as f:
         config = json.load(f)
     
-    all_summaries = []
     funnels = config.get('funnels', [])
     max_f = config.get('max_funnels')
     if max_f is not None:
         funnels = funnels[:max_f]
-        
-    for url in funnels:
-        print(f"\n--- Starting funnel: {url} ---")
-        summary = run_funnel(url, config, config.get('headless', True))
-        all_summaries.append(summary)
+    
+    headless = config.get('headless', True)
+    if args.headless is not None:
+        headless = args.headless.lower() == 'true'
+
+    if args.parallel:
+        print(f"\n--- Starting {len(funnels)} funnels in PARALLEL mode ---\n")
+        with ThreadPoolExecutor(max_workers=len(funnels)) as executor:
+            futures = [executor.submit(run_funnel, url, config, headless) for url in funnels]
+            all_summaries = [f.result() for f in futures]
+    else:
+        print(f"\n--- Starting {len(funnels)} funnels in SEQUENTIAL mode ---\n")
+        all_summaries = []
+        for url in funnels:
+            print(f"\n>> Processing: {url}")
+            summary = run_funnel(url, config, headless)
+            all_summaries.append(summary)
     
     with open(os.path.join('results', 'summary.json'), 'w', encoding='utf-8') as f:
         json.dump(all_summaries, f, indent=4)
     
     print("\nBatch run completed.")
     for s in all_summaries:
-        print(f"URL: {s['url']} | Paywall reached: {s['paywall_reached']} | Steps: {s['steps_total']}")
+        status = "PASSED" if s['paywall_reached'] else "FAILED"
+        print(f"[{status}] URL: {s['url']} | Steps: {s['steps_total']}")
