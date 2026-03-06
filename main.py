@@ -41,8 +41,8 @@ def is_forbidden_button(el, log_func=None) -> bool:
         if re.search(pattern, full_text):
             forbidden = True; reason = "forbidden_ui"
 
-        if forbidden and log_func:
-            log_func(f"forbidden_skipped={reason} | text: {txt[:30]}")
+        if forbidden and log_func and txt.strip():
+            log_func(f"forbidden_skipped={reason} | text: {txt.strip()[:30]}")
         return forbidden
     except: return False
 
@@ -448,7 +448,8 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
 
             btn = find_continue_button(page, log_func)
             if btn:
-                log_func(f"Clicking continue: {btn.inner_text()}")
+                btn_txt = " ".join((btn.inner_text() or "").split())
+                log_func(f"Clicking continue: {btn_txt}")
                 close_popups(page, log_func)
                 try:
                     btn.click(force=True, timeout=2000)
@@ -463,7 +464,8 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             cont_btn = find_continue_button(page, log_func)
             # Priority to "Start" buttons
             if cont_btn and any(k in (cont_btn.inner_text() or "").lower() for k in ["start", "get my", "get started", "take the", "offer", "claim", "discount", "spin"]):
-                log_func(f"Landing/Start button found: {cont_btn.inner_text()}. Clicking...")
+                c_txt = " ".join((cont_btn.inner_text() or "").split())
+                log_func(f"Landing/Start button found: {c_txt}. Clicking...")
                 close_popups(page, log_func)
                 cont_btn.click(force=True, timeout=1000)
                 wait_for_transition(page, start_url, start_hash)
@@ -503,7 +505,8 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
 
             if not target:
                 if cont_btn:
-                    log_func(f"No choices, clicking continue: {cont_btn.inner_text()}")
+                    c_txt = " ".join((cont_btn.inner_text() or "").split())
+                    log_func(f"No choices, clicking continue: {c_txt}")
                     close_popups(page, log_func)
                     cont_btn.click(force=True, timeout=1000)
                     wait_for_transition(page, start_url, start_hash)
@@ -512,7 +515,9 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             start_choices = get_choices_text(page, log_func)
             start_ui = get_ui_step(page)
             # 1. Click choice
-            log_func(f"Clicking choice: {target.inner_text()[:50].strip()}")
+            clean_target_text = " ".join((target.inner_text() or "").split())
+            display_text = clean_target_text[:50] if clean_target_text else "<No text>"
+            log_func(f"Clicking choice: {display_text}")
             try:
                 target.scroll_into_view_if_needed(timeout=2000)
             except: pass
@@ -553,7 +558,8 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
 
                 curr_cont = find_continue_button(page, log_func)
                 if curr_cont and curr_cont.is_enabled():
-                    log_func(f"Continue button found: {curr_cont.inner_text()}. Clicking...")
+                    c_txt = " ".join((curr_cont.inner_text() or "").split())
+                    log_func(f"Continue button found: {c_txt}. Clicking...")
                     close_popups(page, log_func)
                     pre_cont_hash = get_screen_hash(page)
                     try:
