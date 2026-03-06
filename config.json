@@ -1,9 +1,10 @@
 {
  "funnels": [
   "https://coursiv.io/dynamic?prc_id=1069",
-  "https://coursiv.io/dynamic"
+  "https://coursiv.io/dynamic",
+  "https://dance-bit.com/welcomeBellyRef"
  ],
- "max_funnels": 2,
+ "max_funnels": 3,
  "headless": true,
  "max_steps": 80,
  "slow_mo_ms": 50
