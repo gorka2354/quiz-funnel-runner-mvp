@@ -281,6 +281,11 @@ def classify_screen(page: Page, log_func):
     inputs = page.locator("input:not([type='hidden']):visible, textarea:visible")
     if inputs.count() >= 1: return debug_return('input', f"{inputs.count()} input(s) found")
 
+    # 4.5 Email Consent / Notifications (Should be question)
+    consent_kws = ["receive emails", "send me emails", "notifications", "updates", "stay in the loop", "newsletters", "consent", "i'm in"]
+    if any(k in t for k in consent_kws) and ("email" in t or "mail" in t or "email-page" in u):
+        return debug_return('question', "Email consent/notification screen detected")
+
     # 5. Question vs Info (Smart separation)
     nav_words = [
         "next", "continue", "skip", "back", "weiter", "zurück", "next step", "proceed", 
