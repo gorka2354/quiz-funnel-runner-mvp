@@ -286,10 +286,6 @@ def classify_screen(page: Page, log_func):
     if any(k in t for k in consent_kws) and ("email" in t or "mail" in t or "email-page" in u):
         return debug_return('question', "Email consent/notification screen detected")
 
-    # 4.6 Readiness Assessment (Surgical fix for specific screens)
-    if "rate your readiness" in t:
-        return debug_return('question', "Readiness assessment screen detected")
-
     # 5. Question vs Info (Smart separation)
     nav_words = [
         "next", "continue", "skip", "back", "weiter", "zurück", "next step", "proceed", 
@@ -338,19 +334,27 @@ def classify_screen(page: Page, log_func):
 
     total_interactive = len(choices) + len(nav_btns)
 
+    has_skip = any("skip" in b for b in nav_btns)
+    has_picker = False
+    try:
+        has_picker = page.locator("select:visible, [role='combobox']:visible, [role='listbox']:visible, [role='slider']:visible, [class*='picker' i]:visible").count() > 0
+    except: pass
+
     # Core Logic based on exact number of interactive options
     if total_interactive == 0:
         return debug_return('other', "No clear type detected")
         
     if total_interactive == 1:
+        if has_picker:
+            return debug_return('question', "Single CTA but custom picker/selector found")
         # Only one available action option
         return debug_return('info', "Single interactive element detected, classifying as info")
         
     if total_interactive >= 2:
         # Two or more explicit interactive options
-        if len(choices) >= 1:
-            # If at least one of them is a choice (e.g., 'No' alongside 'Yes'), it's a question
-            return debug_return('question', f"Multiple options detected ({total_interactive}), including choices")
+        if len(choices) >= 1 or has_skip or has_picker:
+            # If at least one of them is a choice, or it has a skip button/picker, it's a question
+            return debug_return('question', f"Multiple options detected ({total_interactive}), including choices/skip/picker")
         else:
             # Multiple nav buttons but no explicit choices (e.g., 'Back' and 'Next') -> Info
             return debug_return('info', f"Multiple nav buttons ({total_interactive}) but no choices, classifying as info")
