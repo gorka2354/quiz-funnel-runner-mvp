@@ -286,6 +286,10 @@ def classify_screen(page: Page, log_func):
     if any(k in t for k in consent_kws) and ("email" in t or "mail" in t or "email-page" in u):
         return debug_return('question', "Email consent/notification screen detected")
 
+    # 4.6 Readiness Assessment (Surgical fix for specific screens)
+    if "rate your readiness" in t:
+        return debug_return('question', "Readiness assessment screen detected")
+
     # 5. Question vs Info (Smart separation)
     nav_words = [
         "next", "continue", "skip", "back", "weiter", "zurück", "next step", "proceed", 
