@@ -299,7 +299,6 @@ def classify_screen(page: Page, log_func):
     ]
     
     # Get all potential interactive elements
-    # Broaden selectors to include 'a' and 'div[role="button"]' as requested
     raw_els = page.locator("[data-testid*='answer' i]:visible, [class*='Card' i]:not([class*='testimonial' i]):not([class*='review' i]):visible, label:visible, button:visible, a:visible, [role='button']:visible, div[role='button']:visible")
     
     choices = []
@@ -308,16 +307,24 @@ def classify_screen(page: Page, log_func):
     for i in range(raw_els.count()):
         el = raw_els.nth(i)
         if is_forbidden_button(el, log_func): continue
+
+        # Verify it's genuinely interactive
+        is_int = el.evaluate("""el => {
+            const t = el.tagName.toLowerCase();
+            if (t === 'button' || t === 'a' || t === 'label' || t === 'input') return true;
+            if (el.getAttribute('role') === 'button') return true;
+            return window.getComputedStyle(el).cursor === 'pointer';
+        }""")
+        if not is_int: continue
+
         txt = (el.inner_text() or "").lower().strip()
         
-        # If element is visible and interactive but has no text (like cups in DanceBit), it's likely a choice
         if not txt:
             tag = el.evaluate("el => el.tagName").lower()
             if tag in ['button', 'label', 'input']:
                 choices.append("empty_choice")
             continue
 
-        # Check if the text matches any navigation keyword
         is_nav = False
         for w in nav_words:
             if txt == w or txt.startswith(w + "!") or txt.startswith(w + ".") or (len(txt) < 20 and w in txt):
@@ -327,24 +334,26 @@ def classify_screen(page: Page, log_func):
         if is_nav:
             nav_btns.append(txt)
         else:
-            # Even short or numeric texts can be choices
             choices.append(txt)
 
-    # Logic rules
-    if len(choices) >= 2:
-        return debug_return('question', f"Multiple choices found ({len(choices)})")
-    
-    # If we have 0 or 1 choice but at least one navigation/CTA button, it's an Info screen
-    if len(nav_btns) >= 1:
-        # Check if the single 'choice' is actually just the same as a nav button
-        return debug_return('info', f"Info screen: {len(nav_btns)} CTA button(s) found, insufficient choices for a question")
+    total_interactive = len(choices) + len(nav_btns)
 
-    # Fallback for questions without clear buttons
-    if "?" in t and len(choices) >= 2:
-        return debug_return('question', "Question mark + multiple options detected")
-
-    if len(nav_btns) >= 1:
-        return debug_return('info', "Fallback info: navigation buttons found")
+    # Core Logic based on exact number of interactive options
+    if total_interactive == 0:
+        return debug_return('other', "No clear type detected")
+        
+    if total_interactive == 1:
+        # Only one available action option
+        return debug_return('info', "Single interactive element detected, classifying as info")
+        
+    if total_interactive >= 2:
+        # Two or more explicit interactive options
+        if len(choices) >= 1:
+            # If at least one of them is a choice (e.g., 'No' alongside 'Yes'), it's a question
+            return debug_return('question', f"Multiple options detected ({total_interactive}), including choices")
+        else:
+            # Multiple nav buttons but no explicit choices (e.g., 'Back' and 'Next') -> Info
+            return debug_return('info', f"Multiple nav buttons ({total_interactive}) but no choices, classifying as info")
 
     return debug_return('other', "No clear type detected")
 
