@@ -244,7 +244,15 @@ def classify_screen(page: Page, log_func):
     if ("coursiv.io" in u and "selling-page" in u) or (has_price and has_billing and has_cta):
         return debug_return('paywall', "Paywall signals detected")
 
-    # 3. Email
+    # 3. Game/Prize/Spin screens (should be info)
+    game_kws = ["spin", "wheel", "prize"]
+    if any(k in t for k in game_kws) or "prize-wheel" in u:
+        # Check if there is an actual SPIN button
+        btn_text = (page.evaluate("() => Array.from(document.querySelectorAll('button, a, [role=\"button\"]')).map(el => el.innerText).join(' ')") or "").lower()
+        if any(k in btn_text for k in game_kws) or "prize-wheel" in u:
+            return debug_return('info', "Game/Prize screen detected (keyword in buttons/URL)")
+
+    # 4. Email
     has_email_input = page.locator("input[type='email'], input[autocomplete*='email' i]").count() > 0
     if not has_email_input:
         inputs = page.locator("input:not([type='hidden'])")
@@ -317,15 +325,14 @@ def classify_screen(page: Page, log_func):
     if len(choices) >= 2:
         return debug_return('question', f"Multiple choices found ({len(choices)})")
     
-    if len(choices) == 1 and len(nav_btns) >= 1:
-        return debug_return('question', "Gated question: choice + next button")
-        
-    if len(nav_btns) >= 1 and len(choices) == 0:
-        return debug_return('info', f"Info screen: 0 choices, {len(nav_btns)} CTA button(s) found")
+    # If we have 0 or 1 choice but at least one navigation/CTA button, it's an Info screen
+    if len(nav_btns) >= 1:
+        # Check if the single 'choice' is actually just the same as a nav button
+        return debug_return('info', f"Info screen: {len(nav_btns)} CTA button(s) found, insufficient choices for a question")
 
     # Fallback for questions without clear buttons
-    if "?" in t or re.search(r'\d+/\d+', t):
-        return debug_return('question', "Question mark or progress detected")
+    if "?" in t and len(choices) >= 2:
+        return debug_return('question', "Question mark + multiple options detected")
 
     if len(nav_btns) >= 1:
         return debug_return('info', "Fallback info: navigation buttons found")
