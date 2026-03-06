@@ -322,17 +322,25 @@ def classify_screen(page: Page, log_func):
             choices.append(txt)
 
     # Logic rules
+    ui_step = get_ui_step(page)
+    has_progress = ui_step != "unknown" and "/" in ui_step
+
+    # If we have 2+ choices, it's almost certainly a question
     if len(choices) >= 2:
         return debug_return('question', f"Multiple choices found ({len(choices)})")
     
+    # Special case: If there's a progress indicator (X/Y), it's likely a question 
+    # even if choices are tricky to detect (e.g. custom divs)
+    if has_progress and (len(choices) >= 1 or "?" in t):
+         return debug_return('question', f"Question detected via progress ({ui_step}) and text/choice")
+
     # If we have 0 or 1 choice but at least one navigation/CTA button, it's an Info screen
     if len(nav_btns) >= 1:
-        # Check if the single 'choice' is actually just the same as a nav button
         return debug_return('info', f"Info screen: {len(nav_btns)} CTA button(s) found, insufficient choices for a question")
 
     # Fallback for questions without clear buttons
-    if "?" in t and len(choices) >= 2:
-        return debug_return('question', "Question mark + multiple options detected")
+    if "?" in t and (len(choices) >= 2 or has_progress):
+        return debug_return('question', "Question mark + progress/options detected")
 
     if len(nav_btns) >= 1:
         return debug_return('info', "Fallback info: navigation buttons found")
