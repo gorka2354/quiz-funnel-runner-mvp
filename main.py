@@ -576,7 +576,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                 except:
                     try: btn.click(force=True, timeout=1000)
                     except:
-                        try: btn.evaluate("el => el.click()")
+                        try: btn.evaluate("el => el.click()", timeout=1000)
                         except: pass
             else:
                 try: page.locator("input:not([type='hidden']):visible").first.press("Enter")
@@ -741,14 +741,16 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                         time.sleep(0.5)
                     except: pass
 
-                    try: cont_btn.click(timeout=1000)
+                    try: cont_btn.click(timeout=2000)
                     except:
-                        try: cont_btn.click(force=True, timeout=1000)
+                        try: cont_btn.click(force=True, timeout=2000)
                         except:
-                            try: cont_btn.evaluate("el => el.click()", timeout=1000)
+                            try: cont_btn.evaluate("el => el.click()", timeout=2000)
                             except: pass
-                    page.keyboard.press("Enter")
-                    wait_for_transition(page, start_url, pre_cont_hash)
+                    
+                    if not wait_for_transition(page, start_url, pre_cont_hash, timeout=3.0):
+                        page.keyboard.press("Enter")
+                        wait_for_transition(page, start_url, pre_cont_hash)
                     return "info_continue_pressed"
                 return "no_choices_found"
                 
@@ -775,7 +777,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                 try:
                     target.click(force=True, timeout=1000)
                 except Exception as e2:
-                    try: target.evaluate("el => el.dispatchEvent(new MouseEvent('click', {view: window, bubbles: true, cancelable: true}))")
+                    try: target.evaluate("el => el.dispatchEvent(new MouseEvent('click', {view: window, bubbles: true, cancelable: true}))", timeout=1000)
                     except:
                         try:
                             # Final fallback: physical mouse click
@@ -802,8 +804,9 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                 curr_ui = get_ui_step(page)
                 curr_choices = get_choices_text(page, log_func)
                 
-                url_changed = urlparse(page.url).path != urlparse(start_url).path
-                ui_changed = curr_ui != start_ui and curr_ui != "unknown"
+                url_changed = page.url != start_url
+                hash_changed = get_screen_hash(page) != start_hash
+                ui_changed = curr_ui != start_ui
                 choices_changed = start_choices and curr_choices and curr_choices != start_choices
                 
                 # Update has_cont_btn status in real-time in case it appeared
@@ -811,8 +814,8 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     has_cont_btn = find_continue_button(page, log_func=None) is not None
                 
                 # In multiselect or pages with a continue button, choice text might change (e.g. checkmarks/active state) but we shouldn't auto-advance
-                if url_changed or ui_changed or (choices_changed and not is_multiselect_page and not has_cont_btn):
-                    log_func(f"Auto-transition detected (ui_step: {start_ui} -> {curr_ui})")
+                if url_changed or hash_changed or (ui_changed and curr_ui != "unknown") or (choices_changed and not is_multiselect_page and not has_cont_btn):
+                    log_func(f"Auto-transition detected (ui_step: {start_ui} -> {curr_ui}, hash_changed: {hash_changed})")
                     transitioned_auto = True
                     break
                 time.sleep(0.3)
@@ -830,7 +833,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                 has_cont_btn_now = find_continue_button(page) is not None
 
                 # If the UI updated or URL changed, we're good
-                if (curr_ui != start_ui and curr_ui != "unknown") or (urlparse(page.url).path != urlparse(start_url).path):
+                if (curr_ui != start_ui and curr_ui != "unknown") or (page.url != start_url) or (get_screen_hash(page) != start_hash):
                     break
 
                 # If choices changed and there is NO continue button, it's a multiselect waiting for more clicks, so break to loop.
@@ -853,23 +856,27 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                             time.sleep(0.5)
                         except: pass
 
-                        try: curr_cont.click(timeout=1000)
+                        try: curr_cont.click(timeout=2000)
                         except:
-                            try: curr_cont.click(force=True, timeout=1000)
+                            try: curr_cont.click(force=True, timeout=2000)
                             except:
-                                try: curr_cont.evaluate("el => el.click()", timeout=1000)
+                                try: curr_cont.evaluate("el => el.click()", timeout=2000)
                                 except: pass
 
-                        # Extra click using raw DOM for stubborn React forms like MadMuscles email consent
-                        try: curr_cont.evaluate("el => el.dispatchEvent(new MouseEvent('click', {view: window, bubbles: true, cancelable: true}))")
-                        except: pass
+                        # Check if transition happened already to avoid double-clicking and 30s hangs
+                        if not wait_for_transition(page, page.url, pre_cont_hash, timeout=3.0):
+                            # Extra click using raw DOM for stubborn React forms like MadMuscles email consent
+                            try: curr_cont.evaluate("el => el.dispatchEvent(new MouseEvent('click', {view: window, bubbles: true, cancelable: true}))", timeout=2000)
+                            except: pass
                     else:
                         log_func("Continue button is disabled, skipping click.")
 
-                    time.sleep(0.5)
-                    page.keyboard.press("Enter")
+                    # Only press Enter if we STILL haven't transitioned
+                    if not wait_for_transition(page, page.url, pre_cont_hash, timeout=3.0):
+                        page.keyboard.press("Enter")
+                        wait_for_transition(page, page.url, pre_cont_hash, timeout=10.0)
+
                     clicked_continue = True
-                    wait_for_transition(page, page.url, pre_cont_hash, timeout=10.0)
                     return "continue_clicked"
                 time.sleep(0.5)
             # 3. Multiselect
@@ -1027,7 +1034,7 @@ def run_funnel(url: str, config: dict, is_headless: bool):
                             try: btn.evaluate("el => el.scrollIntoView({block: 'center'})")
                             except: pass
                             time.sleep(0.5)
-                            try: btn.evaluate("el => el.click()")
+                            try: btn.evaluate("el => el.click()", timeout=1000)
                             except: btn.click(force=True, timeout=1000)
                     except: pass
 
