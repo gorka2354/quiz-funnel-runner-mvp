@@ -225,9 +225,9 @@ def ensure_privacy_checkbox_checked(page: Page, log_func) -> bool:
 
 DEBUG_CLASSIFY = True
 
-def classify_screen(page: Page, log_func):
+def classify_screen(page: Page, log_func=None):
     def debug_return(ctype, reason):
-        if DEBUG_CLASSIFY:
+        if log_func:
             log_func(f"classify_reason={reason}")
         return ctype
 
@@ -236,71 +236,111 @@ def classify_screen(page: Page, log_func):
     except: pass
     u = page.url.lower()
     
-    # Check for visible inputs first to prevent false positive loading screens
-    has_visible_inputs = False
+    # Check for inputs explicitly
+    input_state = None
     try:
-        if page.locator("input:not([type='hidden']):visible, textarea:visible").count() > 0:
-            has_visible_inputs = True
+        input_state = page.evaluate("""() => {
+            const inputs = Array.from(document.querySelectorAll("input:not([type='hidden']):not([type='checkbox']):not([type='radio']), textarea")).filter(el => {
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.opacity !== '0';
+            });
+            if (inputs.length === 0) return null;
+            
+            let is_email = false;
+            let is_name = false;
+            let is_age = false;
+            
+            for (let el of inputs) {
+                if (el.type === 'email' || (el.autocomplete && el.autocomplete.toLowerCase().includes('email'))) {
+                    is_email = true;
+                }
+                let p = (el.placeholder || "").toLowerCase();
+                let n = (el.name || "").toLowerCase();
+                if (p.includes('email') || p.includes('mail@') || n.includes('email')) is_email = true;
+                if (p.includes('name') || n.includes('name')) is_name = true;
+                if (p.includes('age') || p.includes('years') || n.includes('age')) is_age = true;
+                
+                if (el.id) {
+                    let label = document.querySelector(`label[for="${el.id}"]`);
+                    if (label) {
+                        let lt = label.innerText.toLowerCase();
+                        if (lt.includes('email')) is_email = true;
+                        if (lt.includes('name')) is_name = true;
+                    }
+                }
+            }
+            return { count: inputs.length, is_email, is_name, is_age };
+        }""")
+    except: pass
+
+    has_visible_inputs = input_state is not None and input_state.get('count', 0) > 0
+
+    heading_text = ""
+    try:
+        heading_text = page.evaluate("() => Array.from(document.querySelectorAll('h1, h2, .heading')).map(el => el.innerText).join(' ').toLowerCase()")
     except: pass
 
     # 0. Loading / Transitional Screens
     if not has_visible_inputs:
         loading_kws = ["analyzing", "loading", "magic", "preparing", "generating", "calculating", "personalizing", "processing", "please wait"]
-        if any(k in u for k in loading_kws) or any(k in t[:500] for k in loading_kws):
-            return debug_return('loading', "Transitional/Loading screen detected")
+        is_loading_url = any(k in u for k in ["magic-page", "prepareplan", "loading", "analyzing"])
+        has_nav = page.locator("button:visible, [role='button']:visible, a.button:visible").filter(has_text=re.compile(r'continue|next|got it|start|proceed', re.I)).count() > 0
+        has_choices = page.locator("[data-testid*='answer' i]:visible, [class*='Item' i]:visible, [class*='Card' i]:not([class*='testimonial' i]):not([class*='review' i]):visible, button:visible").count() > 0
+        
+        if is_loading_url and not has_nav:
+            return debug_return('loading', "Transitional/Loading screen detected via URL")
+            
+        if not has_nav and not has_choices:
+            if any(k in u for k in loading_kws) or any(k in t[:500] for k in loading_kws) or any(k in heading_text for k in loading_kws):
+                return debug_return('loading', "Transitional/Loading screen detected (no nav buttons or choices)")
 
     # 1. Checkout
     checkout_kws = ["card number", "cvv", "mm/yy", "confirm payment", "paypal", "buy now", "apple pay", "google pay", "pay now", "order now"]
     if any(k in t for k in checkout_kws) or page.locator("input[name*='card']").count() > 0 or any(k in u for k in ['checkout', 'payment', 'billing']):
         return debug_return('checkout', "Checkout keywords, card inputs, or URL found")
 
-    # 2. Email (Prioritize over Paywall to avoid false positives on conversion-heavy email pages)
-    has_email_input = page.locator("input[type='email'], input[autocomplete*='email' i]").count() > 0
-    if not has_email_input:
-        inputs = page.locator("input:not([type='hidden'])")
-        for i in range(inputs.count()):
-            try:
-                p = (inputs.nth(i).get_attribute("placeholder") or "").lower()
-                if any(k in p for k in ["email", "e-mail", "mail@"]): has_email_input = True; break
-            except: pass
-
-    # If attributes are not enough, check if there is an input AND "email" keywords in text/URL
-    if not has_email_input and page.locator("input:not([type='hidden'])").count() > 0:
-        if any(k in t for k in ["email", "e-mail", "электронная почта", "адрес почты"]):
-            # Only if it's not a profile data screen (age, weight, etc.)
-            pd_kws = ["age", "height", "weight", "name", "рост", "вес", "возраст", "имя"]
-            if not any(k in t for k in pd_kws):
-                has_email_input = True
-
-    if (has_email_input or "email-page" in u) and "magic-page" not in u: 
-        return debug_return('email', "Email field found via attributes or text")
-
-    # 3. Paywall
+    # 2. Paywall
     has_price = any(k in t for k in ["€", "$", "£", "₽", "usd", "eur", "gbp", "руб", "price", "cost", "total"]) or re.search(r'\d+[.,]\d+\s*[€$£₽]', t)
     has_billing = any(k in t for k in ["subscribe", "trial", "billed", "pricing", "order", "save", "off", "guarantee", "secure", "money-back", "7-day", "billing"])
     has_cta = any(k in t for k in ["get my", "get your", "checkout", "start trial", "claim", "buy now", "pay now", "proceed to my plan", "get my plan"])
     
-    # 2+ signals is enough for paywall if price is present, or 3 signals total
     signals = [bool(has_price), bool(has_billing), bool(has_cta)]
     if ("coursiv.io" in u and "selling-page" in u) or (sum(signals) >= 2 and has_price) or (sum(signals) >= 3) or any(k in u for k in ['paywall', 'offer', 'selling']):
         return debug_return('paywall', f"Paywall signals detected (count={sum(signals)})")
 
+    # 3. Email vs Input
+    if has_visible_inputs:
+        is_em = input_state.get('is_email', False)
+        is_nm = input_state.get('is_name', False)
+        is_ag = input_state.get('is_age', False)
+        
+        # If it explicitly says email in the field, it's email
+        if is_em and not is_nm:
+            return debug_return('email', "Email field found via attributes")
+            
+        # If it says name or age, it's input
+        if is_nm or is_ag:
+            return debug_return('input', "Name/Age field found")
+            
+        # Fallback to headings
+        if any(k in heading_text for k in ["email", "e-mail", "mail"]):
+            return debug_return('email', "Email context in heading")
+            
+        if any(k in heading_text for k in ["name", "age", "weight", "height", "call you"]):
+            return debug_return('input', "Input context in heading")
+            
+        if "email" in u and "magic-page" not in u:
+            return debug_return('email', "Email in URL")
+            
+        return debug_return('input', f"{input_state['count']} input(s) found without explicit email signals")
+
     # 4. Game/Prize/Spin screens (should be info)
     game_kws = ["spin", "wheel", "prize"]
     if any(k in t for k in game_kws) or "prize-wheel" in u:
-        # Check if there is an actual SPIN button
-        btn_text = (page.evaluate("() => Array.from(document.querySelectorAll('button, a, [role=\"button\"]')).map(el => el.innerText).join(' ')") or "").lower()
+        btn_text = (page.evaluate('() => Array.from(document.querySelectorAll(\'button, a, [role="button"]\')).map(el => el.innerText).join(" ")') or "").lower()
         if any(k in btn_text for k in game_kws) or "prize-wheel" in u:
             return debug_return('info', "Game/Prize screen detected (keyword in buttons/URL)")
-
-    # 4. Input (with animation safety)
-    pd_kws = ["age", "height", "weight", "name", "cm", "kg", "years", "call you"]
-    if any(k in t for k in pd_kws) or any(k in u for k in ["name", "age", "weight", "height"]):
-        try: page.wait_for_selector("input:not([type='hidden']):visible", timeout=2000)
-        except: pass
-    
-    inputs = page.locator("input:not([type='hidden']):visible, textarea:visible")
-    if inputs.count() >= 1: return debug_return('input', f"{inputs.count()} input(s) found")
 
     # 4.5 Email Consent / Notifications (Should be question)
     consent_kws = ["receive emails", "send me emails", "notifications", "updates", "stay in the loop", "newsletters", "consent", "i'm in"]
@@ -315,17 +355,14 @@ def classify_screen(page: Page, log_func):
         "do it", "ready", "begin", "let's", "go", "transformation"
     ]
     
-    # Get all potential interactive elements
     raw_els = page.locator("[data-testid*='answer' i]:visible, [class*='Card' i]:not([class*='testimonial' i]):not([class*='review' i]):visible, label:visible, button:visible, a:visible, [role='button']:visible, div[role='button']:visible")
-    
     choices = []
     nav_btns = []
     
     for i in range(raw_els.count()):
         el = raw_els.nth(i)
-        if is_forbidden_button(el, log_func): continue
+        if is_forbidden_button(el): continue
 
-        # Verify it's genuinely interactive
         is_int = el.evaluate("""el => {
             const t = el.tagName.toLowerCase();
             if (t === 'button' || t === 'a' || t === 'label' || t === 'input') return true;
@@ -361,27 +398,21 @@ def classify_screen(page: Page, log_func):
         has_picker = page.locator("select:visible, [role='combobox']:visible, [role='listbox']:visible, [role='slider']:visible, [class*='picker' i]:visible").count() > 0
     except: pass
 
-    # Core Logic based on exact number of interactive options
     if total_interactive == 0:
         return debug_return('other', "No clear type detected")
         
     if total_interactive == 1:
         if has_picker:
             return debug_return('question', "Single CTA but custom picker/selector found")
-        # Only one available action option
         return debug_return('info', "Single interactive element detected, classifying as info")
         
     if total_interactive >= 2:
-        # Two or more explicit interactive options
         if len(choices) >= 1 or has_skip or has_picker:
-            # If at least one of them is a choice, or it has a skip button/picker, it's a question
             return debug_return('question', f"Multiple options detected ({total_interactive}), including choices/skip/picker")
         else:
-            # Multiple nav buttons but no explicit choices (e.g., 'Back' and 'Next') -> Info
             return debug_return('info', f"Multiple nav buttons ({total_interactive}) but no choices, classifying as info")
 
     return debug_return('other', "No clear type detected")
-
 
 def is_element_in_viewport(el: Page) -> bool:
     try:
@@ -969,30 +1000,6 @@ def run_funnel(url: str, config: dict, is_headless: bool):
             step, history = 1, []
             while step <= 80:
                 curr_u = page.url
-                # Be more precise about loading URLs to avoid getting stuck on email screens with magic in the query string
-                is_loading_url = False
-                
-                # If block is email-page, it's definitely not a loading screen
-                if "block=email-page" not in curr_u:
-                    if "block=magic-page" in curr_u or "block=loading" in curr_u or "block=analyzing" in curr_u:
-                        is_loading_url = True
-                    elif any(k in urlparse(curr_u).path.lower() for k in ["magic", "analyzing", "loading", "prepareplan", "processing"]):
-                        is_loading_url = True
-                    
-                if is_loading_url:
-                    log("Loading/Transitional URL detected, waiting 15s...")
-                    time.sleep(15); curr_u = page.url
-                    # After waiting for the URL, check if there is a button we can click if it's stuck loading
-                    if history.count(f"{curr_u}|{get_screen_hash(page)}") >= 1:
-                        try:
-                            btn = page.locator("button:visible, [role='button']:visible").first
-                            if btn.count() > 0: 
-                                btn.click(force=True, timeout=1000)
-                            else:
-                                # Click middle of screen as fallback to dismiss overlays
-                                page.mouse.click(page.viewport_size['width'] / 2, page.viewport_size['height'] / 2)
-                        except: pass
-                        time.sleep(5)
 
                 # Wait for screen to stabilize before acting
                 stab_hash = get_screen_hash(page)
