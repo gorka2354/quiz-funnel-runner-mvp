@@ -283,15 +283,37 @@ def classify_screen(page: Page, log_func=None):
 
     # 0. Loading / Transitional Screens
     if not has_visible_inputs:
-        loading_kws = ["analyzing", "loading", "magic", "preparing", "generating", "calculating", "personalizing", "processing", "please wait"]
+        loading_kws = ["analyzing", "loading", "magic", "preparing", "generating", "calculating", "personalizing", "processing", "please wait", "building", "creating", "optimizing", "selecting", "almost there", "wait", "just a moment", "crafting"]
         is_loading_url = any(k in u for k in ["magic-page", "prepareplan", "loading", "analyzing"])
         has_nav = page.locator("button:visible, [role='button']:visible, a.button:visible").filter(has_text=re.compile(r'continue|next|got it|start|proceed', re.I)).count() > 0
         has_choices = page.locator("[data-testid*='answer' i]:visible, [class*='Item' i]:visible, [class*='Card' i]:not([class*='testimonial' i]):not([class*='review' i]):visible, button:visible").count() > 0
         
-        if is_loading_url and not has_nav:
+        # Visual loading indicators check
+        has_loader_element = False
+        try:
+            has_loader_element = page.evaluate("""() => {
+                const loaders = document.querySelectorAll('[role="progressbar"], [class*="spinner" i], [class*="loader" i], [class*="progress" i], svg circle');
+                for (let el of Array.from(loaders)) {
+                    const style = window.getComputedStyle(el);
+                    if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 5 && rect.height > 5) return true;
+                    }
+                }
+                return false;
+            }""")
+        except: pass
+        
+        # Check if it's explicitly an email consent page first to avoid false loading hits
+        consent_kws = ["receive emails", "send me emails", "notifications", "updates", "stay in the loop", "newsletters", "consent", "i'm in", "tips or updates"]
+        is_email_consent = any(k in t for k in consent_kws) and ("email" in t or "mail" in t or "email-page" in u)
+
+        if is_loading_url and not has_nav and not is_email_consent:
             return debug_return('loading', "Transitional/Loading screen detected via URL")
             
-        if not has_nav and not has_choices:
+        if not has_nav and not has_choices and not is_email_consent:
+            if has_loader_element:
+                return debug_return('loading', "Transitional/Loading screen detected via visual spinner/progressbar")
             if any(k in u for k in loading_kws) or any(k in t[:500] for k in loading_kws) or any(k in heading_text for k in loading_kws):
                 return debug_return('loading', "Transitional/Loading screen detected (no nav buttons or choices)")
 
@@ -343,7 +365,7 @@ def classify_screen(page: Page, log_func=None):
             return debug_return('info', "Game/Prize screen detected (keyword in buttons/URL)")
 
     # 4.5 Email Consent / Notifications (Should be question)
-    consent_kws = ["receive emails", "send me emails", "notifications", "updates", "stay in the loop", "newsletters", "consent", "i'm in"]
+    consent_kws = ["receive emails", "send me emails", "notifications", "updates", "stay in the loop", "newsletters", "consent", "i'm in", "tips or updates"]
     if any(k in t for k in consent_kws) and ("email" in t or "mail" in t or "email-page" in u):
         return debug_return('question', "Email consent/notification screen detected")
 
@@ -399,7 +421,8 @@ def classify_screen(page: Page, log_func=None):
     except: pass
 
     if total_interactive == 0:
-        return debug_return('other', "No clear type detected")
+        # If there are absolutely no interactive elements, no inputs, and it's not a paywall, it's virtually guaranteed to be a loading/transitional screen
+        return debug_return('loading', "No interactive elements found, assuming loading/transitional screen")
         
     if total_interactive == 1:
         if has_picker:
