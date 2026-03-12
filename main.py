@@ -504,20 +504,35 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
         if screen_type == 'checkout': return "checkout reached"
 
         if screen_type == 'loading':
-            log_func("Loading screen detected. Waiting for transition...")
-            if not wait_for_transition(page, start_url, start_hash, timeout=15.0):
+            log_func("Loading screen detected. Waiting for semantic transition (URL or UI change)...")
+            t_start = time.time()
+            transitioned = False
+            # Wait up to 25 seconds for loading to finish naturally
+            while time.time() - t_start < 25.0:
+                try: page.wait_for_load_state('networkidle', timeout=500)
+                except: pass
+                
+                # Check 1: Did URL change?
+                if page.url != start_url:
+                    transitioned = True
+                    break
+                    
+                # Check 2: Re-classify silently. If it's no longer 'loading' (e.g., buttons appeared), we are done
+                current_st = classify_screen(page, log_func=None)
+                if current_st != 'loading':
+                    transitioned = True
+                    break
+                    
+                time.sleep(1.0)
+                
+            if not transitioned:
                 log_func("Loading transition timeout. Forcing click...")
                 try:
                     # In coursiv, sometimes the loading is actually a button
                     btn = page.locator("button:visible, [role='button']:visible, a.button:visible").first
                     if btn.count() > 0: btn.click(force=True, timeout=1000)
                 except: pass
-                # A specific wait for URL or hash change
-                t_start = time.time()
-                while time.time() - t_start < 5.0:
-                    if page.url != start_url or get_screen_hash(page) != start_hash:
-                        break
-                    time.sleep(0.5)
+                time.sleep(3.0)
             return "loading_waited"
 
         if screen_type in ['email', 'input']:
