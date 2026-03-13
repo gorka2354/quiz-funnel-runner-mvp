@@ -420,6 +420,8 @@ def classify_screen(page: Page, log_func=None):
         has_picker = page.locator("select:visible, [role='combobox']:visible, [role='listbox']:visible, [role='slider']:visible, [class*='picker' i]:visible").count() > 0
     except: pass
 
+    real_choices = [c for c in choices if c != "empty_choice"]
+
     if total_interactive == 0:
         # If there are absolutely no interactive elements, no inputs, and it's not a paywall, it's virtually guaranteed to be a loading/transitional screen
         return debug_return('loading', "No interactive elements found, assuming loading/transitional screen")
@@ -430,10 +432,13 @@ def classify_screen(page: Page, log_func=None):
         return debug_return('info', "Single interactive element detected, classifying as info")
         
     if total_interactive >= 2:
-        if len(choices) >= 1 or has_skip or has_picker:
+        # It is a question if we have real text choices, OR if we have skip/picker, 
+        # OR if we have multiple empty choices AND no nav buttons (e.g. image grid question)
+        # OR if we have 3 or more empty choices (e.g. image grid with a Continue button, like water tracker)
+        if len(real_choices) >= 1 or has_skip or has_picker or (len(choices) > 1 and len(nav_btns) == 0) or len(choices) >= 3:
             return debug_return('question', f"Multiple options detected ({total_interactive}), including choices/skip/picker")
         else:
-            return debug_return('info', f"Multiple nav buttons ({total_interactive}) but no choices, classifying as info")
+            return debug_return('info', f"Multiple interactive elements ({total_interactive}) but no explicit choices, classifying as info")
 
     return debug_return('other', "No clear type detected")
 
