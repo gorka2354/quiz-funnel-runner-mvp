@@ -1106,11 +1106,9 @@ def run_funnel(url: str, config: dict, is_headless: bool):
                 
                 log(f"step:{step} | type:{st} | ui_step:{ui_before} | url:{page.url[:60]}")
                 act = perform_action(page, st, log, res_dir, curr_h, curr_u)
-                
+
                 # Check for double skip
-                time.sleep(1)
-                ui_after = get_ui_step(page)
-                
+                ui_after = get_ui_step(page)                
                 def parse_ui(s):
                     if not s or s == "unknown": return -1
                     m = re.match(r'(\d+)', s)
