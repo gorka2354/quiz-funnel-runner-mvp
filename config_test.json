@@ -1,0 +1,1 @@
+{"funnels": ["https://coursiv.io/dynamic?prc_id=1069", "https://coursiv.io/dynamic?prc_id=1069"], "max_funnels": 2, "headless": true, "max_steps": 80, "slow_mo_ms": 50, "paywall_screenshot_delay_ms": 3000}

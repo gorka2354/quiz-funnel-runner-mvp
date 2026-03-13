@@ -1,7 +1,9 @@
-import json, argparse, os, time, re, hashlib, shutil, random
+import json, argparse, os, time, re, hashlib, shutil, random, logging
 from urllib.parse import urlparse
-from playwright.sync_api import sync_playwright, Page, TimeoutError
+from playwright.sync_api import sync_playwright, Page, TimeoutError, Error as PlaywrightError
 from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger("quiz_runner")
 
 REALISTIC_NAMES = ["john.doe", "jane.smith", "alex.wilson", "emma.brown", "mike.taylor", "sarah.jones", "david.clark", "lisa.white"]
 REALISTIC_DOMAINS = ["gmail.com", "yahoo.com", "outlook.com", "icloud.com"]
@@ -59,7 +61,9 @@ def is_forbidden_button(el, log_func=None) -> bool:
         if forbidden and log_func and txt.strip():
             log_func(f"forbidden_skipped={reason} | text: {txt.strip()[:30]}")
         return forbidden
-    except: return False
+    except Exception as e:
+        logger.debug(f"is_forbidden_button error on element: {str(e)[:100]}")
+        return False
 
 def get_choices_text(page: Page, log_func=None):
     try:
@@ -77,13 +81,15 @@ def get_choices_text(page: Page, log_func=None):
                 curr = els.nth(i)
                 if is_forbidden_button(curr, log_func): continue
                 try: txt = (curr.evaluate("el => el.innerText", timeout=1000) or "").strip()
-                except: txt = ""
+                except Exception: txt = ""
                 if txt and not re.search(r'\d+\s*/\s*\d+', txt) and len(txt) < 100:
                     texts.append(txt)
             if texts:
                 return "|".join(texts[:3])
         return ""
-    except: return ""
+    except Exception as e:
+        logger.debug(f"get_choices_text error: {str(e)[:100]}")
+        return ""
 
 def get_ui_step(page: Page):
     try:
@@ -118,22 +124,25 @@ def get_ui_step(page: Page):
             return null;
         }""")
         if res: return res.replace(" ", "")
-    except: pass
+    except Exception as e:
+        logger.debug(f"get_ui_step error: {str(e)[:100]}")
     return "unknown"
 
-def get_slug(url: str):
-    p = urlparse(url); d = p.netloc.replace('www.', ''); pth = p.path.strip('/').replace('/', '-')
-    slug = f"{d}-{pth}" if pth else d
-    if p.query:
-        q_hash = hashlib.md5(p.query.encode()).hexdigest()[:6]
-        slug = f"{slug}-{q_hash}"
-    return slug
+def get_slug(u: str):
+    parsed = urlparse(u)
+    base = re.sub(r'[^a-zA-Z0-9\-]', '', parsed.netloc + parsed.path.replace('/', '-'))
+    if parsed.query:
+        query_hash = hashlib.md5(parsed.query.encode('utf-8')).hexdigest()[:6]
+        return f"{base}-{query_hash}"
+    return base
 
 def get_screen_hash(page: Page):
     try:
         t = page.evaluate("() => (document.body.innerText || '').slice(0, 10000)")
         return hashlib.md5(t.encode('utf-8')).hexdigest()
-    except: return ""
+    except Exception as e:
+        logger.debug(f"get_screen_hash error: {str(e)[:100]}")
+        return ""
 
 def close_popups(page: Page, log_func):
     try:
@@ -190,7 +199,9 @@ def close_popups(page: Page, log_func):
             return True
             
         return False
-    except: pass
+    except Exception as e:
+        logger.debug(f"close_popups error: {str(e)[:100]}")
+        pass
 
 
 def ensure_privacy_checkbox_checked(page: Page, log_func) -> bool:
@@ -212,16 +223,18 @@ def ensure_privacy_checkbox_checked(page: Page, log_func) -> bool:
             if not checkbox.is_checked():
                 try:
                     page.evaluate("(el) => el.click()", checkbox.element_handle())
-                except:
+                except Exception:
                     try:
                         checkbox.click(force=True, timeout=1000)
-                    except:
+                    except Exception:
                         container.click(force=True, timeout=1000)
             return checkbox.is_checked()
             
         container.click(force=True, timeout=1000)
         return True
-    except: return False
+    except Exception as e:
+        logger.debug(f"ensure_privacy_checkbox_checked error: {str(e)[:100]}")
+        return False
 
 DEBUG_CLASSIFY = True
 
@@ -233,7 +246,9 @@ def classify_screen(page: Page, log_func=None):
 
     t = ""
     try: t = page.evaluate("() => (document.body.innerText || '').toLowerCase()")
-    except: pass
+    except Exception as e:
+        logger.debug(f"classify_screen get text error: {str(e)[:100]}")
+        pass
     u = page.url.lower()
     
     # Check for inputs explicitly
@@ -272,14 +287,16 @@ def classify_screen(page: Page, log_func=None):
             }
             return { count: inputs.length, is_email, is_name, is_age };
         }""")
-    except: pass
+    except Exception as e:
+        logger.debug(f"classify_screen get inputs error: {str(e)[:100]}")
+        pass
 
     has_visible_inputs = input_state is not None and input_state.get('count', 0) > 0
 
     heading_text = ""
     try:
         heading_text = page.evaluate("() => Array.from(document.querySelectorAll('h1, h2, .heading')).map(el => el.innerText).join(' ').toLowerCase()")
-    except: pass
+    except Exception: pass
 
     # 0. Loading / Transitional Screens
     if not has_visible_inputs:
@@ -302,7 +319,7 @@ def classify_screen(page: Page, log_func=None):
                 }
                 return false;
             }""")
-        except: pass
+        except Exception: pass
         
         # Check if it's explicitly an email consent page first to avoid false loading hits
         consent_kws = ["receive emails", "send me emails", "notifications", "updates", "stay in the loop", "newsletters", "consent", "i'm in", "tips or updates"]
@@ -418,7 +435,7 @@ def classify_screen(page: Page, log_func=None):
     has_picker = False
     try:
         has_picker = page.locator("select:visible, [role='combobox']:visible, [role='listbox']:visible, [role='slider']:visible, [class*='picker' i]:visible").count() > 0
-    except: pass
+    except Exception: pass
 
     real_choices = [c for c in choices if c != "empty_choice"]
 
@@ -462,7 +479,7 @@ def is_element_in_viewport(el: Page) -> bool:
             // Allow elements that are partially visible in viewport (e.g. large tiles)
             return rect.width > 0 && rect.height > 0 && rect.left < windowWidth && rect.right > 0 && rect.top < windowHeight && rect.bottom >= 0;
         }""")
-    except: return False
+    except Exception: return False
 
 def find_continue_button(page: Page, log_func=None):
     # Always prioritize "Got it" modals first, regardless of element type
@@ -501,6 +518,7 @@ def find_continue_button(page: Page, log_func=None):
         if idx >= 0:
             return page.locator(selector).nth(idx)
     except Exception as e:
+        logger.debug(f"find_continue_button error: {str(e)[:100]}")
         pass
 
     return None
@@ -510,7 +528,7 @@ def wait_for_transition(page: Page, old_url: str, old_hash: str, timeout=10.0):
     while time.time() - start < timeout:
         try:
             page.wait_for_load_state('networkidle', timeout=500)
-        except: pass
+        except Exception: pass
         if page.url != old_url or get_screen_hash(page) != old_hash: return True
         time.sleep(0.5)
     return False
@@ -620,7 +638,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             
             # Force scroll to bottom to ensure all buttons/terms are loaded
             try: page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            except: pass
+            except Exception: pass
             time.sleep(0.5)
 
             # Force check any checkboxes on the screen just in case
@@ -631,30 +649,30 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     is_checked = cb.evaluate("el => el.checked")
                     if not is_checked:
                         try: cb.evaluate("el => { el.click(); el.checked = true; el.dispatchEvent(new Event('change', {bubbles:true})); }")
-                        except: pass
-            except: pass
+                        except Exception: pass
+            except Exception: pass
 
             # If there's a specific submit/continue button, click it, else press Enter
             btn = find_continue_button(page, log_func)
             if btn:
                 try: btn_txt = " ".join((btn.evaluate("el => el.innerText") or "").split())
-                except: btn_txt = "Continue"
+                except Exception: btn_txt = "Continue"
                 log_func(f"Clicking continue: {btn_txt}")
                 close_popups(page, log_func)
                 try:
                     btn.evaluate("el => el.scrollIntoView({block: 'center'})")
                     time.sleep(0.3)
-                except: pass
+                except Exception: pass
                 
                 try: btn.click(timeout=1000)
-                except:
+                except Exception:
                     try: btn.click(force=True, timeout=1000)
-                    except:
+                    except Exception:
                         try: btn.evaluate("el => el.click()", timeout=1000)
-                        except: pass
+                        except Exception: pass
             else:
                 try: page.locator("input:not([type='hidden']):visible").first.press("Enter")
-                except: page.keyboard.press("Enter")
+                except Exception: page.keyboard.press("Enter")
                 
             log_func("Input submitted. Waiting for transition...")
             
@@ -671,7 +689,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     # Check if the specific input we filled is still visible
                     if not page.locator("input:not([type='hidden']):visible, textarea:visible").count(): 
                         trans_success = True; break
-                except: 
+                except Exception: 
                     trans_success = True; break
                 time.sleep(0.5)
                 
@@ -696,7 +714,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                                 if "legal." not in urlparse(curr_url).netloc:
                                     break
                             time.sleep(0.5)
-                except: pass
+                except Exception: pass
             return "input_submitted"
 
         if screen_type in ['question', 'info', 'other']:
@@ -705,48 +723,48 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             # If a modal "Got it" or "OK" button is present, we must click it FIRST to unblock the UI!
             try: 
                 cont_txt_lower = (cont_btn.evaluate("el => el.innerText", timeout=1000) or "").lower()
-            except: 
+            except Exception: 
                 cont_txt_lower = ""
             
             if cont_btn and any(k in cont_txt_lower for k in ["got it", "close"]):
                 try: c_txt = " ".join((cont_btn.evaluate("el => el.innerText") or "").split())
-                except: c_txt = "Got it"
+                except Exception: c_txt = "Got it"
                 log_func(f"Modal dismiss button found: {c_txt}. Clicking...")
                 close_popups(page, log_func)
                 try:
                     cont_btn.evaluate("el => el.scrollIntoView({block: 'center'})", timeout=1000)
                     time.sleep(0.3)
-                except: pass
+                except Exception: pass
                 try: cont_btn.click(timeout=1000)
-                except:
+                except Exception:
                     try: cont_btn.click(force=True, timeout=1000)
-                    except:
+                    except Exception:
                         try: cont_btn.evaluate("el => el.click()", timeout=1000)
-                        except: pass
+                        except Exception: pass
                 wait_for_transition(page, start_url, start_hash)
                 return "modal_dismissed"
 
             # For info screens, if we found a continue button, use it!
             if screen_type == 'info' and cont_btn:
                 try: c_txt = " ".join((cont_btn.evaluate("el => el.innerText") or "").split())
-                except: c_txt = "Continue"
+                except Exception: c_txt = "Continue"
                 log_func(f"Info screen continue found: {c_txt}. Clicking...")
                 close_popups(page, log_func)
                 try:
                     cont_btn.evaluate("el => el.scrollIntoView({block: 'center'})", timeout=1000)
                     time.sleep(0.3)
-                except: pass
+                except Exception: pass
                 try: cont_btn.click(timeout=1000)
-                except:
+                except Exception:
                     try: cont_btn.click(force=True, timeout=1000)
-                    except: pass
+                    except Exception: pass
                 wait_for_transition(page, start_url, start_hash)
                 return "info_continue_pressed"
 
             # Priority to "Start" buttons
             if cont_btn and any(k in cont_txt_lower for k in ["start", "get my", "get started", "take the", "offer", "claim", "discount", "spin"]):
                 try: c_txt = " ".join((cont_btn.evaluate("el => el.innerText") or "").split())
-                except: c_txt = "Continue"
+                except Exception: c_txt = "Continue"
                 log_func(f"Landing/Start button found: {c_txt}. Clicking...")
                 close_popups(page, log_func)
                 cont_btn.click(force=True, timeout=1000)
@@ -768,14 +786,14 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     curr = els.nth(i)
                     if is_forbidden_button(curr, log_func) or not is_element_in_viewport(curr): continue
                     try: txt = (curr.evaluate("el => el.innerText", timeout=500) or "").strip()
-                    except: txt = ""
+                    except Exception: txt = ""
                     if txt and not re.search(r'^\d+\s*/\s*\d+$', txt) and len(txt) < 100 and not is_nav_button(txt):
                         # Avoid clicking already checked items if possible
                         try:
                             cb = curr.locator("input[type='checkbox'], input[type='radio']")
                             if cb.count() > 0:
                                 if cb.first.evaluate("el => el.checked", timeout=500): continue
-                        except: pass
+                        except Exception: pass
                         valid_targets.append(curr)
                 if valid_targets: break
 
@@ -793,7 +811,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                             if is_forbidden_button(curr, log_func) or not is_element_in_viewport(curr): continue
                             try:
                                 txt = (curr.evaluate("el => el.innerText", timeout=500) or "").strip()
-                            except: txt = ""
+                            except Exception: txt = ""
                             if not txt:
                                 tag = curr.evaluate("el => el.tagName").lower()
                                 role = (curr.get_attribute("role") or "").lower()
@@ -806,21 +824,21 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             if not target:
                 if cont_btn:
                     try: c_txt = " ".join((cont_btn.evaluate("el => el.innerText") or "").split())
-                    except: c_txt = "Continue"
+                    except Exception: c_txt = "Continue"
                     log_func(f"No choices, clicking continue: {c_txt}")
                     close_popups(page, log_func)
                     pre_cont_hash = get_screen_hash(page)
                     try:
                         cont_btn.evaluate("el => el.scrollIntoView({block: 'center'})", timeout=1000)
                         time.sleep(0.5)
-                    except: pass
+                    except Exception: pass
 
                     try: cont_btn.click(timeout=2000)
-                    except:
+                    except Exception:
                         try: cont_btn.click(force=True, timeout=2000)
-                        except:
+                        except Exception:
                             try: cont_btn.evaluate("el => el.click()", timeout=2000)
-                            except: pass
+                            except Exception: pass
                     
                     if not wait_for_transition(page, start_url, pre_cont_hash, timeout=3.0):
                         page.keyboard.press("Enter")
@@ -842,7 +860,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
             try:
                 target.evaluate("el => el.scrollIntoView({block: 'center'})", timeout=1000)
                 time.sleep(0.3)
-            except: pass
+            except Exception: pass
             close_popups(page, log_func)
             try:
                 # First try regular click, if intercepted, it will fail and we can try force click
@@ -852,13 +870,13 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     target.click(force=True, timeout=1000)
                 except Exception as e2:
                     try: target.evaluate("el => el.dispatchEvent(new MouseEvent('click', {view: window, bubbles: true, cancelable: true}))", timeout=1000)
-                    except:
+                    except Exception:
                         try:
                             # Final fallback: physical mouse click
                             box = target.bounding_box()
                             if box:
                                 page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
-                        except: log_func(f"Click error: {str(e2)[:50]}")
+                        except Exception: log_func(f"Click error: {str(e2)[:50]}")
             
             # If it looks like a multiselect (checkboxes present), maybe it's just a regular question
             # But we need to know so we don't auto-advance just because a checkbox was toggled.
@@ -918,7 +936,7 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                 curr_cont = find_continue_button(page, log_func)
                 if curr_cont and (curr_cont.is_enabled() or not is_multiselect_page):
                     try: c_txt = " ".join((curr_cont.evaluate("el => el.innerText") or "").split())
-                    except: c_txt = "Continue"
+                    except Exception: c_txt = "Continue"
                     is_en = curr_cont.is_enabled()
                     log_func(f"Continue button found: {c_txt} (enabled: {is_en}). Clicking...")
 
@@ -928,20 +946,20 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                         try:
                             curr_cont.evaluate("el => el.scrollIntoView({block: 'center'})", timeout=1000)
                             time.sleep(0.5)
-                        except: pass
+                        except Exception: pass
 
                         try: curr_cont.click(timeout=2000)
-                        except:
+                        except Exception:
                             try: curr_cont.click(force=True, timeout=2000)
-                            except:
+                            except Exception:
                                 try: curr_cont.evaluate("el => el.click()", timeout=2000)
-                                except: pass
+                                except Exception: pass
 
                         # Check if transition happened already to avoid double-clicking and 30s hangs
                         if not wait_for_transition(page, page.url, pre_cont_hash, timeout=3.0):
                             # Extra click using raw DOM for stubborn React forms like MadMuscles email consent
                             try: curr_cont.evaluate("el => el.dispatchEvent(new MouseEvent('click', {view: window, bubbles: true, cancelable: true}))", timeout=2000)
-                            except: pass
+                            except Exception: pass
                     else:
                         log_func("Continue button is disabled, skipping click.")
 
@@ -970,27 +988,27 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                                 cb = curr.locator("input[type='checkbox'], input[type='radio']")
                                 if cb.count() > 0 and cb.first.evaluate("el => el.checked", timeout=500):
                                     is_already_checked = True
-                            except: pass
+                            except Exception: pass
                             
                             if is_already_checked: continue
 
                             try:
                                 close_popups(page, log_func)
                                 try: curr.evaluate("el => el.scrollIntoView({block: 'center'})")
-                                except: pass
+                                except Exception: pass
                                 try: curr.evaluate("el => el.click()", timeout=1000)
-                                except: curr.click(force=True, timeout=500)
+                                except Exception: curr.click(force=True, timeout=500)
                                 
                                 if curr_cont.is_enabled():
                                     close_popups(page, log_func)
                                     pre_multi_hash = get_screen_hash(page)
                                     try: curr_cont.evaluate("el => el.scrollIntoView({block: 'center'})")
-                                    except: pass
+                                    except Exception: pass
                                     try: curr_cont.evaluate("el => el.click()", timeout=1000)
-                                    except: curr_cont.click(force=True, timeout=1000)
+                                    except Exception: curr_cont.click(force=True, timeout=1000)
                                     wait_for_transition(page, page.url, pre_multi_hash, timeout=10.0)
                                     return "multiselect_completed"
-                            except: pass
+                            except Exception: pass
 
                     # If we exhausted all options and it still thinks it's disabled, try clicking it anyway!
                     close_popups(page, log_func)
@@ -998,11 +1016,11 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
                     try:
                         try:
                             curr_cont.evaluate("el => el.scrollIntoView({block: 'center'})")
-                        except: pass
+                        except Exception: pass
                         
                         try: 
                             curr_cont.evaluate("el => el.click()", timeout=1000)
-                        except: 
+                        except Exception: 
                             curr_cont.click(force=True, timeout=1000)
                             
                         wait_for_transition(page, page.url, pre_multi_hash, timeout=10.0)
@@ -1016,14 +1034,6 @@ def perform_action(page: Page, screen_type: str, log_func, results_dir: str, sta
     return "none"
 
 def run_funnel(url: str, config: dict, is_headless: bool):
-    def get_slug(u): 
-        parsed = urlparse(u)
-        base = re.sub(r'[^a-zA-Z0-9\-]', '', parsed.netloc + parsed.path.replace('/', '-'))
-        if parsed.query:
-            query_hash = hashlib.md5(parsed.query.encode('utf-8')).hexdigest()[:6]
-            return f"{base}-{query_hash}"
-        return base
-        
     slug = get_slug(url)
     res_dir = os.path.join('results', slug)
     os.makedirs(res_dir, exist_ok=True)
@@ -1037,98 +1047,111 @@ def run_funnel(url: str, config: dict, is_headless: bool):
             l = f"[{time.strftime('%H:%M:%S')}] {m}\n"; f.write(l); print(l.strip())
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=is_headless, slow_mo=100)
-            page = browser.new_context(**p.devices['iPhone 13']).new_page()
-            log(f"Navigating to {url} (slug: {slug})"); page.goto(url, wait_until='load', timeout=60000)
-            
-            step, history = 1, []
-            while step <= 80:
-                curr_u = page.url
-
-                # Wait for screen to stabilize before acting
-                stab_hash = get_screen_hash(page)
-                for _ in range(3):
-                    time.sleep(0.5)
-                    new_hash = get_screen_hash(page)
-                    if new_hash == stab_hash: break
-                    stab_hash = new_hash
-
-                close_popups(page, log)
-                curr_h = get_screen_hash(page)
-                st = classify_screen(page, log)
-                ui_before = get_ui_step(page)
-
-                log(f"step:{step} | type:{st} | ui_step:{ui_before} | url:{curr_u[:80]}")
-
-                curr_id = f"{curr_u}|{curr_h}"
-                history.append(curr_id)
-
-                # Failsafe for external/legal pages
-                if "legal." in urlparse(curr_u).netloc:
-                    log(f"Stuck on legal/policy page {curr_u}. Stopping.")
-                    summary["error"] = "legal_page_trap"
-                    break
-
-                is_stuck = history.count(curr_id) == 4 or (st == 'loading' and history.count(curr_id) == 2)
-                is_fatal = history.count(curr_id) > 5 or (st == 'loading' and history.count(curr_id) > 3)
-                # Allow a few retries, but force an info fallback if stuck
-                if is_stuck:
-                    log("Stuck loop warning. Attempting to force continue...")
-
-                    try:
-                        # Try to find specific continue button first
-                        btn = find_continue_button(page)
-                        if not btn:
-                            # Try to find any unclicked interactive element that isn't forbidden
-                            btn = page.locator("button:visible, [role='button']:visible").first
-                        if btn and btn.count() > 0:
-                            try: btn.evaluate("el => el.scrollIntoView({block: 'center'})")
-                            except: pass
-                            time.sleep(0.5)
-                            try: btn.evaluate("el => el.click()", timeout=1000)
-                            except: btn.click(force=True, timeout=1000)
-                    except: pass
-
-                    page.keyboard.press("Enter")
-                    wait_for_transition(page, curr_u, curr_h, timeout=5.0)
-                    continue
-
-                elif is_fatal:
-                    log(f"Stuck at {curr_u}. Stopping."); summary["error"] = "stuck_loop"; break                
-                if st in ['paywall', 'checkout']:
-                    delay_ms = config.get('paywall_screenshot_delay_ms', 3000)
-                    log(f"Paywall/Checkout detected. Waiting {delay_ms}ms before screenshot...")
-                    time.sleep(delay_ms / 1000.0)
+            try:
+                page = browser.new_context(**p.devices['iPhone 13']).new_page()
+                log(f"Navigating to {url} (slug: {slug})"); page.goto(url, wait_until='load', timeout=60000)
                 
-                screen_name = f"{step:02d}_{st}.png"
-                local_path = os.path.join(res_dir, screen_name)
-                page.screenshot(path=local_path, full_page=True)
-                shutil.copy2(local_path, os.path.join(classified_dir, st, f"{slug}__{screen_name}"))
-                
-                log(f"step:{step} | type:{st} | ui_step:{ui_before} | url:{page.url[:60]}")
-                act = perform_action(page, st, log, res_dir, curr_h, curr_u)
-
-                # Check for double skip
-                ui_after = get_ui_step(page)                
-                def parse_ui(s):
-                    if not s or s == "unknown": return -1
-                    m = re.match(r'(\d+)', s)
-                    return int(m.group(1)) if m else -1
-                
-                ui_b_num = parse_ui(ui_before)
-                ui_a_num = parse_ui(ui_after)
-                
-                if ui_a_num > ui_b_num + 1 and ui_b_num > 0:
-                    log(f"skip_detected=true | UI jumped from {ui_before} to {ui_after}")
-                
-                log(f"action_result:{act}")
-                
-                summary["steps_total"] = step; summary["last_url"] = page.url
-                if st in ['paywall', 'checkout'] or "stopped" in act or "reached" in act:
-                    if st == 'paywall': summary["paywall_reached"] = True
-                    break
-                
-                step += 1
-            browser.close()
+                step, history = 1, []
+                while step <= 80:
+                    curr_u = page.url
+    
+                    # Quick network idle wait instead of hard 1.5s DOM stabilization sleep to catch fast intermediate screens
+                    try: page.wait_for_load_state('networkidle', timeout=500)
+                    except Exception: pass
+    
+                    close_popups(page, log)
+                    curr_h = get_screen_hash(page)
+                    st = classify_screen(page, log)
+                    ui_before = get_ui_step(page)
+    
+                    log(f"step:{step} | type:{st} | ui_step:{ui_before} | url:{curr_u[:80]}")
+    
+                    curr_id = f"{curr_u}|{curr_h}"
+                    history.append(curr_id)
+    
+                    # Failsafe for external/legal pages
+                    if "legal." in urlparse(curr_u).netloc:
+                        log(f"Stuck on legal/policy page {curr_u}. Stopping.")
+                        summary["error"] = "legal_page_trap"
+                        break
+    
+                    is_stuck = history.count(curr_id) == 4 or (st == 'loading' and history.count(curr_id) == 2)
+                    is_fatal = history.count(curr_id) > 5 or (st == 'loading' and history.count(curr_id) > 3)
+                    # Allow a few retries, but force an info fallback if stuck
+                    if is_stuck:
+                        log("Stuck loop warning. Attempting to force continue...")
+    
+                        try:
+                            # Try to find specific continue button first
+                            btn = find_continue_button(page)
+                            if not btn:
+                                # Try to find any unclicked interactive element that isn't forbidden
+                                btn = page.locator("button:visible, [role='button']:visible").first
+                            if btn and btn.count() > 0:
+                                try: btn.evaluate("el => el.scrollIntoView({block: 'center'})")
+                                except Exception: pass
+                                time.sleep(0.5)
+                                try: btn.evaluate("el => el.click()", timeout=1000)
+                                except Exception: btn.click(force=True, timeout=1000)
+                        except Exception as e:
+                            log(f"Fallback continue error: {str(e)[:50]}")
+                            pass
+    
+                        page.keyboard.press("Enter")
+                        wait_for_transition(page, curr_u, curr_h, timeout=5.0)
+                        continue
+    
+                    elif is_fatal:
+                        log(f"Stuck at {curr_u}. Stopping."); summary["error"] = "stuck_loop"; break                
+                    if st in ['paywall', 'checkout']:
+                        delay_ms = config.get('paywall_screenshot_delay_ms', 3000)
+                        log(f"Paywall/Checkout detected. Waiting {delay_ms}ms before screenshot...")
+                        time.sleep(delay_ms / 1000.0)
+                    
+                    if st not in ['loading', 'unknown']:
+                        try:
+                            page.evaluate("document.fonts.ready", timeout=1000)
+                            page.evaluate("""
+                                () => Promise.all(Array.from(document.images).filter(img => !img.complete).map(img => new Promise(resolve => { img.onload = img.onerror = resolve; })))
+                            """, timeout=1500)
+                        except Exception: pass
+                    
+                    screen_name = f"{step:02d}_{st}.png"
+                    local_path = os.path.join(res_dir, screen_name)
+                    try: page.screenshot(path=local_path, full_page=True, animations="disabled")
+                    except Exception: page.screenshot(path=local_path, full_page=True)
+                    shutil.copy2(local_path, os.path.join(classified_dir, st, f"{slug}__{screen_name}"))
+                    
+                    log(f"step:{step} | type:{st} | ui_step:{ui_before} | url:{page.url[:60]}")
+                    act = perform_action(page, st, log, res_dir, curr_h, curr_u)
+    
+                    # Check for double skip
+                    ui_after = get_ui_step(page)                
+                    def parse_ui(s):
+                        if not s or s == "unknown": return -1
+                        m = re.match(r'(\d+)', s)
+                        return int(m.group(1)) if m else -1
+                    
+                    ui_b_num = parse_ui(ui_before)
+                    ui_a_num = parse_ui(ui_after)
+                    
+                    if ui_a_num > ui_b_num + 1 and ui_b_num > 0:
+                        log(f"skip_detected=true | UI jumped from {ui_before} to {ui_after}")
+                    
+                    log(f"action_result:{act}")
+                    
+                    summary["steps_total"] = step; summary["last_url"] = page.url
+                    if st in ['paywall', 'checkout'] or "stopped" in act or "reached" in act:
+                        if st == 'paywall': summary["paywall_reached"] = True
+                        break
+                    
+                    step += 1
+            except Exception as e:
+                log(f"Fatal error in funnel: {str(e)}")
+                summary["error"] = str(e)
+            finally:
+                try: browser.close()
+                except Exception: pass
     return summary
 
 if __name__ == '__main__':
@@ -1136,7 +1159,10 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default='config.json', help='Path to config file')
     parser.add_argument('--parallel', action='store_true', help='Run funnels in parallel threads')
     parser.add_argument('--headless', type=str, help='Override headless mode (true/false)')
+    parser.add_argument('--verbose', action='store_true', help='Enable debug logging')
     args = parser.parse_args()
+    
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     with open(args.config, 'r') as f:
         config = json.load(f)
@@ -1152,9 +1178,16 @@ if __name__ == '__main__':
 
     if args.parallel:
         print(f"\n--- Starting {len(funnels)} funnels in PARALLEL mode ---\n")
-        with ThreadPoolExecutor(max_workers=len(funnels)) as executor:
+        workers = min(len(funnels), config.get('max_parallel', 4))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(run_funnel, url, config, headless) for url in funnels]
-            all_summaries = [f.result() for f in futures]
+            all_summaries = []
+            for f in futures:
+                try:
+                    all_summaries.append(f.result())
+                except Exception as e:
+                    logger.error(f"Funnel failed with exception: {str(e)}")
+                    print(f"Error executing parallel funnel: {e}")
     else:
         print(f"\n--- Starting {len(funnels)} funnels in SEQUENTIAL mode ---\n")
         all_summaries = []
